@@ -542,7 +542,7 @@ class SphericalCompressibleProblem():
 
         return problem_variables + problem_taus
 
-    def set_compressible_problem(self, problem):
+    def set_compressible_problem(self, problem, fixed_s=False):
         equations = OrderedDict()
         u_BCs = OrderedDict()
         T_BCs = OrderedDict()
@@ -573,7 +573,10 @@ class SphericalCompressibleProblem():
                     #No shell bases
                     u_BCs['BC_u1_{}'.format(bn)] = "radial(u_{0}(r={1})) = 0".format(bn, basis.radius)
                     u_BCs['BC_u2_{}'.format(bn)] = "angular(radial(E_{0}(r={1}))) = 0".format(bn, basis.radius)
-                    T_BCs['BC_T_outer_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radius) #needed for energy conservation
+                    if fixed_s:
+                        T_BCs['BC_T_outer_{}'.format(bn)] = "s1_{0}(r={1}) = 0".format(bn, basis.radius) #needed for energy conservation
+                    else:
+                        T_BCs['BC_T_outer_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radius) #needed for energy conservation
                 else:
                     shell_name = self.bases_keys[basis_number+1] 
                     rval = self.stitch_radii[basis_number]
@@ -597,7 +600,10 @@ class SphericalCompressibleProblem():
                     #top of domain
                     u_BCs['BC_u2_{}'.format(bn)] = "radial(u_{0}(r={1})) = 0".format(bn, basis.radii[1])
                     u_BCs['BC_u3_{}'.format(bn)] = "angular(radial(E_{0}(r={1}))) = 0".format(bn, basis.radii[1])
-                    T_BCs['BC_T_outer_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radii[1])
+                    if fixed_s:
+                        T_BCs['BC_T_outer_{}'.format(bn)] = "s1_{0}(r={1}) = 0".format(bn, basis.radii[1])
+                    else:
+                        T_BCs['BC_T_outer_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radii[1])
 
 
         for bn, basis in self.bases.items():
@@ -632,11 +638,14 @@ class SphericalCompressibleProblem():
 
         for name, BC in T_BCs.items():
             if 'outer' in name:
-                energy_constraint = (FlucE_LHS, FlucE_RHS)
-                logger.info('adding BC "{}" (ntheta != 0)'.format(BC))
-                logger.info('adding BC "{}" (ntheta == 0)'.format([str(o) for o in energy_constraint]))
-                problem.add_equation(BC, condition="ntheta != 0")
-                problem.add_equation(energy_constraint, condition="ntheta == 0")
+                if fixed_s:
+                    problem.add_equation(BC)
+                else:
+                    energy_constraint = (FlucE_LHS, FlucE_RHS)
+                    logger.info('adding BC "{}" (ntheta != 0)'.format(BC))
+                    logger.info('adding BC "{}" (ntheta == 0)'.format([str(o) for o in energy_constraint]))
+                    problem.add_equation(BC, condition="ntheta != 0")
+                    problem.add_equation(energy_constraint, condition="ntheta == 0")
             else:
                 logger.info('adding BC "{}"'.format(BC))
                 problem.add_equation(BC)

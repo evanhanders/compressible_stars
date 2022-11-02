@@ -114,9 +114,9 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
 
     namespace['pi'] = pi = np.pi
     locals().update(namespace)
-    ncc_cutoff=1e-9
-    tolerance=1e-9
-    HSE_tolerance = 3e-5
+    ncc_cutoff=1e-6
+    tolerance=1e-6
+    HSE_tolerance = 1e-3
 
     #Solve for ln_rho.
     variables = []
@@ -424,7 +424,12 @@ def build_nccs(plot_nccs=False):
             if 'R' in rb:
                 r_bounds[i] = float(rb.replace('R', ''))*R_star
             elif 'L' in rb:
-                r_bounds[i] = float(rb.replace('L', ''))*core_cz_radius
+                if rb == 'L':
+                    r_bounds[i] = core_cz_radius
+                    use_heat_nd = True
+                else:
+                    r_bounds[i] = float(rb.replace('L', ''))*core_cz_radius
+                    use_heat_nd = False
             else:
                 try:
                     r_bounds[i] = float(r_bounds[i]) * u.cm
@@ -452,7 +457,10 @@ def build_nccs(plot_nccs=False):
     L_nd    = L_CZ
     m_nd    = rho[r==L_nd][0] * L_nd**3 #mass at core cz boundary
     T_nd    = T[r==L_nd][0] #temp at core cz boundary
-    tau_nd  = (1/f_brunt).cgs #timescale of max N^2
+    if use_heat_nd:
+        tau_nd = tau_heat.cgs
+    else:
+        tau_nd  = (1/f_brunt).cgs #timescale of max N^2
     rho_nd  = m_nd/L_nd**3
     u_nd    = L_nd/tau_nd
     s_nd    = L_nd**2 / tau_nd**2 / T_nd
@@ -495,24 +503,35 @@ def build_nccs(plot_nccs=False):
     
     ### entropy gradient
     ### More core convection zone logic here
-    #Build a nice function for our basis in the ball
-    grad_s_width = 0.05
-    grad_s_transition_point = r_bound_nd[1] - grad_s_width
-    logger.info('using default grad s transition point = {}'.format(grad_s_transition_point))
-    logger.info('using default grad s width = {}'.format(grad_s_width))
-    grad_s_center =  grad_s_transition_point - 0.5*grad_s_width
-    grad_s_width *= (L_CZ/L_nd).value
-    grad_s_center *= (L_CZ/L_nd).value
-   
-#    grad_s_outer_ball = grad_s[r/L_nd <= r_bound_nd[1]][-1]
-    grad_s_smooth = np.copy(grad_s)
-#    grad_s_smooth[r/L_nd <= r_bound_nd[1]] = (grad_s_outer_ball * (r/L_nd / r_bound_nd[1])**2)[r/L_nd <= r_bound_nd[1]]
-    flat_value  = np.interp(grad_s_transition_point, r/L_nd, grad_s)
-    grad_s_smooth += (r/L_nd)**2 *  flat_value
-    grad_s_smooth *= zero_to_one(r/L_nd, grad_s_transition_point, width=grad_s_width)
-#    plt.plot(r/L_nd, grad_s_smooth)
-#    plt.yscale('log')
-#    plt.show()
+    if core_cz_radius == r_bounds[-1]:
+        grad_s_smooth = np.zeros_like(grad_s)
+        N2_func = interp1d(r_nd, np.zeros_like(grad_s_smooth), **interp_kwargs)
+    else:
+        #Build a nice function for our basis in the ball
+        grad_s_width = 0.05
+        grad_s_transition_point = r_bound_nd[1] - grad_s_width
+        logger.info('using default grad s transition point = {}'.format(grad_s_transition_point))
+        logger.info('using default grad s width = {}'.format(grad_s_width))
+        grad_s_center =  grad_s_transition_point - 0.5*grad_s_width
+        grad_s_width *= (L_CZ/L_nd).value
+        grad_s_center *= (L_CZ/L_nd).value
+       
+    #    grad_s_outer_ball = grad_s[r/L_nd <= r_bound_nd[1]][-1]
+        grad_s_smooth = np.copy(grad_s)
+    #    grad_s_smooth[r/L_nd <= r_bound_nd[1]] = (grad_s_outer_ball * (r/L_nd / r_bound_nd[1])**2)[r/L_nd <= r_bound_nd[1]]
+        flat_value  = np.interp(grad_s_transition_point, r/L_nd, grad_s)
+        grad_s_smooth += (r/L_nd)**2 *  flat_value
+        grad_s_smooth *= zero_to_one(r/L_nd, grad_s_transition_point, width=grad_s_width)
+    #    plt.plot(r/L_nd, grad_s_smooth)
+    #    plt.yscale('log')
+    #    plt.show()
+        #construct N2 function #TODO: blend logic here & in BVP.
+        smooth_N2 = np.copy(N2_mesa)
+        stitch_value = np.interp(bases['B'].radius, r/L_nd, N2_mesa)
+        smooth_N2[r/L_nd < bases['B'].radius] = (r[r/L_nd < bases['B'].radius]/L_nd / bases['B'].radius)**2 * stitch_value
+        smooth_N2 *= zero_to_one(r/L_nd, grad_s_transition_point, width=grad_s_width)
+        N2_func = interp1d(r_nd, tau_nd**2 * smooth_N2, **interp_kwargs)
+
     
    
     ### Make dedalus domain and bases
@@ -534,6 +553,13 @@ def build_nccs(plot_nccs=False):
         L_conv_sim = np.copy(L_conv)
         L_conv_sim *= one_to_zero(r, 0.9*core_cz_radius, width=0.05*core_cz_radius)
         L_conv_sim *= one_to_zero(r, 0.95*core_cz_radius, width=0.05*core_cz_radius)
+        L_conv_sim /= (r/L_nd)**2 * (4*np.pi)
+        F_conv_func = interp1d(r/L_nd, L_conv_sim/lum_nd, **interp_kwargs)
+    elif config.star['heat_only']:
+        #smooth CZ-RZ transition
+        L_conv_sim = np.copy(Luminosity)
+#        L_conv_sim *= one_to_zero(r, 0.9*core_cz_radius, width=0.05*core_cz_radius)
+#        L_conv_sim *= one_to_zero(r, 0.95*core_cz_radius, width=0.05*core_cz_radius)
         L_conv_sim /= (r/L_nd)**2 * (4*np.pi)
         F_conv_func = interp1d(r/L_nd, L_conv_sim/lum_nd, **interp_kwargs)
     else:
@@ -562,13 +588,6 @@ def build_nccs(plot_nccs=False):
     interpolations['g_phi'] = interp1d(r_nd, g_phi * (tau_nd**2 / L_nd**2), **interp_kwargs)
     interpolations['pomega_tilde'] = interp1d(r_nd, pomega_tilde * (tau_nd**2 / L_nd**2), **interp_kwargs)
 
-    #construct N2 function #TODO: blend logic here & in BVP.
-    smooth_N2 = np.copy(N2_mesa)
-    stitch_value = np.interp(bases['B'].radius, r/L_nd, N2_mesa)
-    smooth_N2[r/L_nd < bases['B'].radius] = (r[r/L_nd < bases['B'].radius]/L_nd / bases['B'].radius)**2 * stitch_value
-#    smooth_N2 = (r/L_nd)**2 * flat_value
-    smooth_N2 *= zero_to_one(r/L_nd, grad_s_transition_point, width=grad_s_width)
-    N2_func = interp1d(r_nd, tau_nd**2 * smooth_N2, **interp_kwargs)
     ln_rho_func = interpolations['ln_rho0']
     grad_ln_rho_func = interpolations['grad_ln_rho0']
     atmo = HSE_solve(c, d, bases,  grad_ln_rho_func, N2_func, F_conv_func,
