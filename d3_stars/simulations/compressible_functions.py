@@ -205,6 +205,7 @@ class SphericalCompressibleProblem():
             ephi = self.namespace['ephi']
             etheta = self.namespace['etheta']
             rvec = self.namespace['rvec_{}'.format(bn)]
+            Cp = self.namespace['Cp']
 
 
             self.namespace['P0_{}'.format(bn)] = P0 = (rho0*pom0)
@@ -264,6 +265,7 @@ class SphericalCompressibleProblem():
             self.namespace['grid_eye_{}'.format(bn)] = grid_eye = d3.Grid(eye).evaluate()
             self.namespace['grid_P0_{}'.format(bn)] = grid_P0 = d3.Grid(P0*ones).evaluate()
             self.namespace['grid_g_phi_{}'.format(bn)] = grid_g_phi = d3.Grid(ones*g_phi)
+            self.namespace['grid_T_ad_z_{}'.format(bn)] = grid_T_ad_z = d3.Grid(ones*grid_g/Cp).evaluate()
 
             for fname in ['rho0', 'ln_rho0', 'grad_ln_rho0', 's0', 'grad_s0', 'pom0', 'grad_pom0', 'g', 'chi_rad', 'grad_chi_rad', 'kappa_rad', 'grad_kappa_rad', 'inv_pom0', 'nu_diff', 'neg_one', 'eye', 'P0']:
                 self.namespace['grid_{}_{}'.format(fname, bn)].name = 'grid_{}_{}'.format(fname, bn)
@@ -355,6 +357,7 @@ class SphericalCompressibleProblem():
 
             #Radiative diffusivity -- we model flux as kappa * grad T1 (not including nonlinear part of T; it's low mach so it's fine.
             self.namespace['F_cond_{}'.format(bn)] = F_cond = -1*kappa_rad*((grad_pom1_RHS)/R_gas)
+            self.namespace['F_cond_superad_{}'.format(bn)] = F_cond = -1*kappa_rad*((grad_pom1_RHS)/R_gas)
           
 
             self.namespace['div_rad_flux_pt1_LHS_{}'.format(bn)] = div_rad_flux_pt1_LHS = grad_kappa_rad@(grad_pom1)
@@ -412,6 +415,10 @@ class SphericalCompressibleProblem():
             self.namespace['Re_{}'.format(bn)] = np.sqrt(u_squared) * d3.Grid(1/nu_diff)
             self.namespace['Ma_{}'.format(bn)] = np.sqrt(u_squared) / np.sqrt(pom_full) 
             self.namespace['L_{}'.format(bn)] = d3.cross(rvec, momentum)
+
+            self.namespace['T_superad_z_{}'.format(bn)] = T_superad_z = grad_pom_full/R_gas - grid_T_ad_z
+            self.namespace['T_superad1_z_{}'.format(bn)] = T_superad1_z = grad_pom1_RHS/R_gas - grid_T_ad_z
+            self.namespace['F_cond_superad_{}'.format(bn)] = F_cond_superad = -1*kappa_rad*(T_superad1_z)
 
             #Fluxes
             self.namespace['F_KE_{}'.format(bn)] = F_KE = u * KE
@@ -639,6 +646,7 @@ class SphericalCompressibleProblem():
         for name, BC in T_BCs.items():
             if 'outer' in name:
                 if fixed_s:
+                    logger.info('adding BC "{}"'.format(BC))
                     problem.add_equation(BC)
                 else:
                     energy_constraint = (FlucE_LHS, FlucE_RHS)

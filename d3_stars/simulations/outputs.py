@@ -16,10 +16,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 output_tasks = {}
-flux_tags = ['cond', 'KE', 'PE', 'enth', 'visc']
+flux_tags = ['cond', 'cond_superad', 'KE', 'PE', 'enth', 'visc']
 defaults = ['u', 'momentum', 'ur', 'u_squared', 'KE', 'PE', 'IE', 'TotE', 'PE1', 'IE1', 'FlucE', 'Re', 'Ma', 'ln_rho1', \
             'pom1', 'pom2', 'pom_fluc', 'pom_full', 'grad_s1', 'L', 's1', 'rho_full', 'rho_fluc', 'enthalpy_fluc', 'N2', \
-            'Q_source', 'visc_source_KE', 'visc_source_IE', 'tot_visc_source',\
+            'Q_source', 'visc_source_KE', 'visc_source_IE', 'tot_visc_source', 'T_superad_z','T_superad1_z',\
             'divRad_source', 'PdV_source_KE', 'PdV_source_IE', 'tot_PdV_source',\
             'source_KE', 'source_IE', 'tot_source',\
             'EOS_goodness', 'EOS_goodness_bg']
