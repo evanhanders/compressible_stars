@@ -296,10 +296,16 @@ def plot_ncc_figure(rvals, mesa_func, dedalus_vals, Ns, ylabel="", fig_name="", 
     if axhline is not None:
         ax1.axhline(axhline, c='k')
 
+    first = True
     for r, y in zip(rvals, dedalus_vals):
         mesa_y = mesa_func(r)
-        ax1.plot(r, mesa_y, label='mesa', c='k', lw=3)
-        ax1.plot(r, y, label='dedalus', c='red')
+        if first:
+            ax1.plot(r, mesa_y, label='mesa', c='k', lw=3)
+            ax1.plot(r, y, label='dedalus', c='red')
+            first = False
+        else:
+            ax1.plot(r, mesa_y, c='k', lw=3)
+            ax1.plot(r, y, c='red')
 
         diff = np.abs(1 - mesa_y/y)
         ax2.plot(r, diff)
@@ -699,14 +705,18 @@ def build_nccs(plot_nccs=False):
                 else:
                     dedalus_yvals.append(np.copy(ncc_dict[ncc]['field_{}'.format(bn)]['g'][0,0,:]))
     
+            interp_func = ncc_dict[ncc]['interp_func']
             if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad']:
                 log = True
             if ncc == 'grad_s0': 
                 axhline = (s_motions / s_nd)
             elif ncc in ['chi_rad', 'grad_chi_rad']:
-                axhline = rad_diff_cutoff
+                if ncc == 'chi_rad':
+                    interp_func = interp1d(r_nd, (L_nd**2/tau_nd).value*rad_diff_nd, **interp_kwargs)
+                    for ind in range(len(dedalus_yvals)):
+                        dedalus_yvals[ind] *= (L_nd**2/tau_nd).value
+                axhline = rad_diff_cutoff*(L_nd**2/tau_nd).value
     
-            interp_func = ncc_dict[ncc]['interp_func']
             if ncc == 'H':
                 interp_func = interp1d(r_vals, ( one_to_zero(r_vals, 1.5*r_bound_nd[1], width=0.05*r_bound_nd[1])*sim_H_eff ) * (1/H_nd), **interp_kwargs )
             elif ncc == 'grad_s0':
@@ -719,8 +729,11 @@ def build_nccs(plot_nccs=False):
                 ylabel='-{}'.format(ncc)
                 for i in range(len(dedalus_yvals)):
                     dedalus_yvals[i] *= -1
+            elif ncc == 'chi_rad':
+                ylabel = 'radiative diffusivity (cm^2/s)'
             else:
                 ylabel = ncc
+
     
             plot_ncc_figure(rvals, interp_func, dedalus_yvals, nvals, \
                         ylabel=ylabel, fig_name=ncc, out_dir=out_dir, log=log, ylim=ylim, \
