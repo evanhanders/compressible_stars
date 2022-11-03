@@ -33,7 +33,7 @@ def zero_to_one(*args, **kwargs):
 
 
 def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stitch=[], r_outer=1, dtype=np.float64, \
-              R=1, gamma=5/3, comm=MPI.COMM_SELF, nondim_radius=1, g_nondim=1, s_motions=1):
+              R=1, gamma=5/3, comm=MPI.COMM_SELF, nondim_radius=1, g_nondim=1, s_motions=1, smooth_edge=True):
 
     Cp = R*gamma/(gamma-1)
     Cv = Cp/gamma
@@ -73,7 +73,10 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
         ones['g'] = 1
 
         namespace['edge_smoothing_{}'.format(k)] = edge_smooth = dist.Field(bases=basis, name='edge_smooth')
-        edge_smooth['g'] = one_to_zero(r, 0.95*bases['B'].radius, width=0.03*bases['B'].radius)
+        if smooth_edge:
+            edge_smooth['g'] = one_to_zero(r, 0.95*bases['B'].radius, width=0.03*bases['B'].radius)
+        else:
+            edge_smooth['g'] = 1
         namespace['N2_{}'.format(k)] = N2 = dist.Field(bases=basis, name='N2')
 
         if k == 'B':
@@ -593,7 +596,7 @@ def build_nccs(plot_nccs=False):
     atmo = HSE_solve(c, d, bases,  grad_ln_rho_func, N2_func, F_conv_func,
               r_outer=r_bound_nd[-1], r_stitch=stitch_radii, dtype=np.float64, \
               R=nondim_R_gas, gamma=nondim_gamma1, comm=MPI.COMM_SELF, \
-              nondim_radius=1, g_nondim=interpolations['g'](1), s_motions=s_motions/s_nd)
+              nondim_radius=1, g_nondim=interpolations['g'](1), s_motions=s_motions/s_nd, smooth_edge=not(config.star['heat_only']))
 
     interpolations['ln_rho0'] = atmo['ln_rho']
     interpolations['Q'] = atmo['Q']
