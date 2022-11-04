@@ -94,8 +94,14 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
         grad_ln_rho['g'][2] = grad_ln_rho_func(r_low)
 
 
+#        namespace['Lconv_{}'.format(k)] = Lconv   = dist.Field(name='Lconv', bases=basis)
         namespace['Fconv_{}'.format(k)] = Fconv   = dist.VectorField(coords, name='Fconv', bases=basis)
         Fconv['g'][2] = Fconv_func(r)
+#        Lconv['g'] = Fconv_func(r)*r**2
+#        plt.plot(r_de.ravel(), d3.div(Fconv).evaluate()['g'].ravel())
+#        Q = (1/r_de**2) * d3.grad(Lconv).evaluate()['g'][2,:]
+#        plt.plot(r_de.ravel(), Q.ravel())
+#        plt.show()
 
         namespace['ln_pomega_LHS_{}'.format(k)] = ln_pomega_LHS = gamma*(s/Cp + ((gamma-1)/gamma)*ln_rho*ones)
         namespace['ln_pomega_{}'.format(k)] = ln_pomega = ln_pomega_LHS + np.log(R)
@@ -397,6 +403,7 @@ class DedalusMesaReader:
         self.mu             = p.mu[::-1] * u.g / u.mol 
         self.lamb_freq = lambda ell : np.sqrt(ell*(ell + 1)) * self.csound/self.r
 
+
         self.R_star = (p.photosphere_r * u.R_sun).cgs
         
         #Put all MESA fields into cgs and calculate secondary MESA fields
@@ -418,6 +425,9 @@ class DedalusMesaReader:
 
 
 def build_nccs(plot_nccs=False):
+    build_massive_star(plot_nccs=plot_nccs)
+
+def build_massive_star(plot_nccs=False):
     # Read in parameters and create output directory
     out_dir, out_file = name_star()
     ncc_dict = config.nccs
@@ -565,16 +575,60 @@ def build_nccs(plot_nccs=False):
     
     if config.star['smooth_h']:
         #smooth CZ-RZ transition
-        L_conv_sim = np.copy(dmr.L_conv)
-        L_conv_sim *= one_to_zero(dmr.r, 0.9*core_cz_radius, width=0.05*core_cz_radius)
-        L_conv_sim *= one_to_zero(dmr.r, 0.95*core_cz_radius, width=0.05*core_cz_radius)
-        L_conv_sim /= (dmr.r/L_nd)**2 * (4*np.pi)
-        F_conv_func = interp1d(dmr.r/L_nd, L_conv_sim/lum_nd, **interp_kwargs)
+        argmax = np.argmax(dmr.L_conv/lum_nd)
+        max_r = dmr.r[argmax]/L_nd
+        max_L = (dmr.L_conv[argmax]/lum_nd).cgs
+
+        #Heating layer
+        Q_base = lambda r : one_to_zero(r, max_r*0.8, width=max_r*0.2)
+        Q = Q_base(dmr.r/L_nd)
+        cumsum = np.cumsum(Q*np.gradient(dmr.r/L_nd) * 4*np.pi*((dmr.r/L_nd)**2))
+        first_adjust = np.copy(max_L / cumsum[-1])
+        Q_func_heat = lambda r: first_adjust * Q_base(r)
+        #cooling layer
+        Q = Q_func_heat(dmr.r/L_nd)
+        Q -= zero_to_one(dmr.r/L_nd, 0.85, width=0.07)
+        cumsum = np.cumsum(Q*np.gradient(dmr.r/L_nd) * 4*np.pi*((dmr.r/L_nd)**2))
+        delta = interp1d(dmr.r/L_nd, cumsum, **interp_kwargs)(1) - max_L
+        adjust = -max_L/delta
+        Q_func = lambda r: Q_func_heat(r) - adjust*zero_to_one(r, 0.85, width=0.07)
+        Q = Q_func(dmr.r/L_nd)
+        cumsum = np.cumsum(Q*np.gradient(dmr.r/L_nd) * 4*np.pi*((dmr.r/L_nd)**2))
+
+#        plt.plot(dmr.r/L_nd, dmr.L_conv/lum_nd)
+#        plt.axhline(max_L)
+#        plt.axvline(max_r)
+#        plt.plot(dmr.r/L_nd, cumsum)
+#        plt.xlim(0, 1)
+#        plt.ylim(-max_L, max_L*2)
+#        plt.show()
+
+        L_conv_sim = np.zeros_like(dmr.r/L_nd)
+        F_conv_sim = L_conv_sim / ( (dmr.r/L_nd)**2 * (4*np.pi) )
+        F_conv_func = interp1d(dmr.r/L_nd, F_conv_sim, **interp_kwargs)
     elif config.star['heat_only']:
         #Just do internal heating, assume background radiation doesn't carry anything!
-        L_conv_sim = np.copy(dmr.Luminosity)
-        L_conv_sim /= (dmr.r/L_nd)**2 * (4*np.pi)
-        F_conv_func = interp1d(dmr.r/L_nd, L_conv_sim/lum_nd, **interp_kwargs)
+        argmax = np.argmax(dmr.L_conv/lum_nd)
+        max_r = dmr.r[argmax]/L_nd
+        max_L = dmr.L_conv[argmax]/lum_nd
+        Q_base = lambda r : one_to_zero(r, max_r*0.8, width=max_r*0.2)
+        Q = Q_base(dmr.r/L_nd)
+        cumsum = np.cumsum(Q*np.gradient(dmr.r/L_nd) * 4*np.pi*((dmr.r/L_nd)**2))
+        cumsum *= max_L / cumsum[-1]
+        Q_func = lambda r: (max_L / cumsum[-1]) * Q_base(r)
+
+#        plt.plot(dmr.r/L_nd, dmr.L_conv/lum_nd)
+#        plt.axhline(max_L)
+#        plt.axvline(max_r)
+#        plt.plot(dmr.r/L_nd, cumsum)
+#        plt.ylim(0, 0.5)
+#        plt.xlim(0, 1)
+#        plt.show()
+#
+
+        L_conv_sim = np.zeros_like(dmr.r/L_nd)
+        F_conv_sim = L_conv_sim / ( (dmr.r/L_nd)**2 * (4*np.pi) )
+        F_conv_func = interp1d(dmr.r/L_nd, F_conv_sim, **interp_kwargs)
     else:
         raise NotImplementedError("must use smooth_h")
 
@@ -609,7 +663,7 @@ def build_nccs(plot_nccs=False):
               nondim_radius=1, g_nondim=interpolations['g'](1), s_motions=s_motions/s_nd, smooth_edge=not(config.star['heat_only']))
 
     interpolations['ln_rho0'] = atmo['ln_rho']
-    interpolations['Q'] = atmo['Q']
+    interpolations['Q'] = Q_func#atmo['Q']
     interpolations['g'] = atmo['g']
     interpolations['g_phi'] = atmo['g_phi']
     interpolations['grad_s0'] = atmo['grad_s']
