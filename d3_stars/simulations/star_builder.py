@@ -445,6 +445,8 @@ def build_nccs(plot_nccs=False):
     else:
         raise ValueError('unknown star_type')
     star_builder.customize_star()
+    star_builder.plot_star()
+    star_builder.save_star()
 
 class MassiveStarBuilder(DedalusMesaReader):
 
@@ -461,10 +463,9 @@ class MassiveStarBuilder(DedalusMesaReader):
         self.mesa_core_radius = self.r[self.mesa_core_bound_ind]
 
         # User specifics to only do core CZ or the fraction of total star to simulate
-        use_heat_nd = False
-        if config.star['cz_only']:
+        self.cz_only = config.star['cz_only']
+        if self.cz_only:
             self.mesa_basis_bounds = [0, self.mesa_core_radius]
-            use_heat_nd = True
         else:
             self.mesa_basis_bounds = list(config.star['r_bounds'])
             for i, rb in enumerate(self.mesa_basis_bounds):
@@ -474,7 +475,7 @@ class MassiveStarBuilder(DedalusMesaReader):
                     elif 'L' in rb:
                         if rb == 'L':
                             self.mesa_basis_bounds[i] = self.mesa_core_radius
-                            use_heat_nd = True
+                            self.cz_only = True
                         else:
                             self.mesa_basis_bounds[i] = float(rb.replace('L', ''))*self.mesa_core_radius
                     else:
@@ -503,7 +504,7 @@ class MassiveStarBuilder(DedalusMesaReader):
         self.L_nd    = self.L_CZ
         self.m_nd    = self.rho[self.r==self.L_nd][0] * self.L_nd**3 #mass at core cz boundary
         self.T_nd    = self.T[self.r==self.L_nd][0] #temp at core cz boundary
-        if use_heat_nd:
+        if self.cz_only:
             self.tau_nd = self.tau_heat.cgs
         else:
             self.tau_nd  = (1/max_f_brunt).cgs #timescale of max N^2
@@ -555,15 +556,14 @@ class MassiveStarBuilder(DedalusMesaReader):
         self.simulation_rad_diff_nd = np.copy(self.mesa_rad_diff_nd) + self.rad_diff_cutoff_nd
         self.simulation_visc_diff_nd = config.numerics['prandtl']*self.rad_diff_cutoff_nd*np.ones_like(self.simulation_rad_diff_nd)
         logger.info('rad_diff cutoff: {:.3e}'.format(self.rad_diff_cutoff_nd))
- 
         
         ### entropy gradient
-        ### More core convection zone logic here
-        if self.mesa_core_radius == self.mesa_basis_bounds[-1]:
+        if self.cz_only:
+            #Entropy gradient is zero everywhere
             grad_s_smooth = np.zeros_like(self.grad_s)
-            N2_func = interp1d(self.mesa_r_nd, np.zeros_like(grad_s_smooth), **interp_kwargs)
+            self.N2_func = interp1d(self.mesa_r_nd, np.zeros_like(grad_s_smooth), **interp_kwargs)
         else:
-            #Build a nice function for our basis in the ball
+            #Build a smooth function in the ball, match the star in the shells.
             grad_s_width = 0.05
             grad_s_transition_point = self.nd_basis_bounds[1] - grad_s_width
             logger.info('using default grad s transition point = {}'.format(grad_s_transition_point))
@@ -572,26 +572,19 @@ class MassiveStarBuilder(DedalusMesaReader):
             grad_s_width *= (self.L_CZ/self.L_nd).value
             grad_s_center *= (self.L_CZ/self.L_nd).value
            
-        #    grad_s_outer_ball = grad_s[r/self.L_nd <= self.nd_basis_bounds[1]][-1]
             grad_s_smooth = np.copy(self.grad_s)
-        #    grad_s_smooth[r/self.L_nd <= self.nd_basis_bounds[1]] = (grad_s_outer_ball * (r/self.L_nd / self.nd_basis_bounds[1])**2)[r/self.L_nd <= self.nd_basis_bounds[1]]
             flat_value  = np.interp(grad_s_transition_point, self.mesa_r_nd, self.grad_s)
             grad_s_smooth += (self.mesa_r_nd)**2 *  flat_value
             grad_s_smooth *= zero_to_one(self.mesa_r_nd, grad_s_transition_point, width=grad_s_width)
-        #    plt.plot(r/self.L_nd, grad_s_smooth)
-        #    plt.yscale('log')
-        #    plt.show()
-            #construct N2 function #TODO: blend logic here & in BVP.
+
+            #construct N2 function #TODO: blend logic here & in BVP?
             smooth_N2 = np.copy(self.N2_mesa)
             stitch_value = np.interp(self.bases['B'].radius, r/self.L_nd, self.N2_mesa)
             smooth_N2[r/self.L_nd < self.bases['B'].radius] = (r[r/self.L_nd < self.bases['B'].radius]/self.L_nd / self.bases['B'].radius)**2 * stitch_value
             smooth_N2 *= zero_to_one(r/self.L_nd, grad_s_transition_point, width=grad_s_width)
-            N2_func = interp1d(self.mesa_r_nd, self.tau_nd**2 * smooth_N2, **interp_kwargs)
+            self.N2_func = interp1d(self.mesa_r_nd, self.tau_nd**2 * smooth_N2, **interp_kwargs)
 
-        
- 
-
-
+        ### Internal heating / cooling function
         interp_r = np.linspace(0, 1, 1000)
         if config.star['smooth_h']:
             #smooth CZ-RZ transition
@@ -612,7 +605,7 @@ class MassiveStarBuilder(DedalusMesaReader):
             cool_lum = np.trapz(4*np.pi*interp_r**2 * interp1d(self.mesa_r_nd, Qcool_base(self.mesa_r_nd), **interp_kwargs)(interp_r), x=interp_r)
             adjustment = np.abs(heat_lum/cool_lum)
             Q_func_cool = lambda r: adjustment * Qcool_base(r)
-            Q_func = lambda r: Q_func_heat(r) + Q_func_cool(r)
+            self.Q_func = lambda r: Q_func_heat(r) + Q_func_cool(r)
 
         elif config.star['heat_only']:
             #smooth CZ-RZ transition
@@ -625,63 +618,65 @@ class MassiveStarBuilder(DedalusMesaReader):
             Q = Q_base(self.mesa_r_nd)
             cumsum = np.cumsum(Q*np.gradient(self.mesa_r_nd) * 4*np.pi*((self.mesa_r_nd)**2))
             first_adjust = np.copy(max_L / cumsum[-1])
-            Q_func = lambda r: first_adjust * Q_base(r)
+            self.Q_func = lambda r: first_adjust * Q_base(r)
         else:
             raise NotImplementedError("must use smooth_h or heat_only")
 
+        # Create interpolations of the various fields that may be used in the problem
+        self.mesa_interpolations = OrderedDict()
+        self.mesa_interpolations['ln_rho0'] = interp1d(self.mesa_r_nd, np.log(self.rho/self.rho_nd), **interp_kwargs)
+        self.mesa_interpolations['rho0'] = lambda r: np.exp(self.mesa_interpolations['ln_rho0'](r))
+        self.mesa_interpolations['ln_T0'] = interp1d(self.mesa_r_nd, np.log(self.T/self.T_nd), **interp_kwargs)
+        self.mesa_interpolations['Q'] = interp1d(self.mesa_r_nd, (1/(4*np.pi*self.mesa_r_nd**2))*np.gradient(self.L_conv/self.lum_nd, self.mesa_r_nd), **interp_kwargs)
+        self.mesa_interpolations['grad_ln_rho0'] = interp1d(self.mesa_r_nd, self.dlogrhodr*self.L_nd, **interp_kwargs)
+        self.mesa_interpolations['grad_ln_T0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
+        self.mesa_interpolations['grad_ln_pom0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
+        self.mesa_interpolations['T0'] = interp1d(self.mesa_r_nd, self.T/self.T_nd, **interp_kwargs)
+        self.mesa_interpolations['pom0'] = interp1d(self.mesa_r_nd, self.R_gas_nd * self.T/self.T_nd, **interp_kwargs)
+        self.mesa_interpolations['nu_diff'] = interp1d(self.mesa_r_nd, self.simulation_visc_diff_nd, **interp_kwargs)
+        self.mesa_interpolations['chi_rad'] = interp1d(self.mesa_r_nd, self.simulation_rad_diff_nd, **interp_kwargs)
+        self.mesa_interpolations['grad_chi_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_rad_diff_nd, self.mesa_r_nd), **interp_kwargs)
+        self.mesa_interpolations['g'] = interp1d(self.mesa_r_nd, -self.g * (self.tau_nd**2/self.L_nd), **interp_kwargs)
+        self.mesa_interpolations['g_phi'] = interp1d(self.mesa_r_nd, self.g_phi * (self.tau_nd**2 / self.L_nd**2), **interp_kwargs)
+        self.mesa_interpolations['grad_s0'] = interp1d(self.mesa_r_nd, self.grad_s_over_cp*self.cp * (self.L_nd/self.s_nd), **interp_kwargs)
+        self.mesa_interpolations['s0'] = interp1d(self.mesa_r_nd, self.s_over_cp*self.cp  / self.s_nd, **interp_kwargs)
+        self.mesa_interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
+        self.mesa_interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
+        self.interpolations = self.mesa_interpolations.copy()
 
-        # Get some timestepping & wave frequency info
-        f_nyq = 2*self.tau_nd*np.sqrt(self.mesa_N2_max_sim)/(2*np.pi)
-        nyq_dt   = (1/f_nyq) 
-        kepler_tau     = 30*60*u.s
-        max_dt_kepler  = kepler_tau/self.tau_nd
-        max_dt = max_dt_kepler
-        logger.info('needed nyq_dt is {} s / {} % of a nondimensional time (Kepler 30 min is {} %) '.format(nyq_dt*self.tau_nd, nyq_dt*100, max_dt_kepler*100))
-     
-        #Create interpolations of the various fields that may be used in the problem
-        mesa_interpolations = OrderedDict()
-        mesa_interpolations['ln_rho0'] = interp1d(self.mesa_r_nd, np.log(self.rho/self.rho_nd), **interp_kwargs)
-        mesa_interpolations['ln_T0'] = interp1d(self.mesa_r_nd, np.log(self.T/self.T_nd), **interp_kwargs)
-        mesa_interpolations['grad_ln_rho0'] = interp1d(self.mesa_r_nd, self.dlogrhodr*self.L_nd, **interp_kwargs)
-        mesa_interpolations['grad_ln_T0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
-        mesa_interpolations['T0'] = interp1d(self.mesa_r_nd, self.T/self.T_nd, **interp_kwargs)
-        mesa_interpolations['nu_diff'] = interp1d(self.mesa_r_nd, self.simulation_visc_diff_nd, **interp_kwargs)
-        mesa_interpolations['chi_rad'] = interp1d(self.mesa_r_nd, self.simulation_rad_diff_nd, **interp_kwargs)
-        mesa_interpolations['grad_chi_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_rad_diff_nd, self.mesa_r_nd), **interp_kwargs)
-        mesa_interpolations['g'] = interp1d(self.mesa_r_nd, -self.g * (self.tau_nd**2/self.L_nd), **interp_kwargs)
-        mesa_interpolations['g_phi'] = interp1d(self.mesa_r_nd, self.g_phi * (self.tau_nd**2 / self.L_nd**2), **interp_kwargs)
-        interpolations = mesa_interpolations.copy()
-
-        ln_rho_func = interpolations['ln_rho0']
-        grad_ln_rho_func = interpolations['grad_ln_rho0']
-        atmo = HSE_solve(self.coords, self.dist, self.bases,  grad_ln_rho_func, N2_func, Q_func=Q_func,
+        #Solve hydrostatic equilibrium BVP for consistency with evolved equations.
+        ln_rho_func = self.interpolations['ln_rho0']
+        grad_ln_rho_func = self.interpolations['grad_ln_rho0']
+        self.atmo = HSE_solve(self.coords, self.dist, self.bases,  grad_ln_rho_func, self.N2_func, Q_func=self.Q_func,
                   r_outer=self.r_outer, r_stitch=self.stitch_radii, dtype=self.dtype, \
                   R=self.R_gas_nd, gamma=self.gamma1_nd, comm=MPI.COMM_SELF, \
-                  nondim_radius=1, g_nondim=interpolations['g'](1), s_motions=self.s_motions/self.s_nd, smooth_edge=not(config.star['heat_only']))
+                  nondim_radius=1, g_nondim=self.interpolations['g'](1), s_motions=self.s_motions/self.s_nd, smooth_edge=not(config.star['heat_only']))
 
-        interpolations['ln_rho0'] = atmo['ln_rho']
-        interpolations['Q'] = Q_func
-        interpolations['g'] = atmo['g']
-        interpolations['g_phi'] = atmo['g_phi']
-        interpolations['grad_s0'] = atmo['grad_s']
-        interpolations['s0'] = atmo['s0']
-        interpolations['pom0'] = atmo['pomega']
-        interpolations['grad_ln_pom0'] = atmo['grad_ln_pomega']
-        F_conv_func = atmo['Fconv']
+        #Update self.interpolations of important quantities from HSE BVP
+        self.F_conv_func = self.atmo['Fconv']
+        self.interpolations['ln_rho0'] = self.atmo['ln_rho']
+        self.interpolations['rho0'] = lambda r: np.exp(self.interpolations['ln_rho0'](r))
+        self.interpolations['Q'] = self.Q_func
+        self.interpolations['grad_s0'] = self.atmo['grad_s']
+        self.interpolations['pom0'] = self.atmo['pomega']
+        self.interpolations['grad_ln_pom0'] = self.atmo['grad_ln_pomega']
+        self.interpolations['s0'] = self.atmo['s0']
+        self.interpolations['g'] = self.atmo['g']
+        self.interpolations['g_phi'] = self.atmo['g_phi']
+        self.interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
+        self.interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
 
-
-        interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, np.exp(interpolations['ln_rho0'](self.mesa_r_nd))*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
-        interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
-
+        #Prep NCCs for construction.
         for ncc in self.ncc_dict.keys():
             for i, bn in enumerate(self.bases.keys()):
                 self.ncc_dict[ncc]['Nmax_{}'.format(bn)] = self.ncc_dict[ncc]['nr_max'][i]
                 self.ncc_dict[ncc]['field_{}'.format(bn)] = None
-            if ncc in interpolations.keys():
-                self.ncc_dict[ncc]['interp_func'] = interpolations[ncc]
+            if ncc in self.interpolations.keys():
+                self.ncc_dict[ncc]['interp_func'] = self.interpolations[ncc]
             else:
                 self.ncc_dict[ncc]['interp_func'] = None
 
+        #Construct NCCs
         for bn, basis in self.bases.items():
             rvals = self.dedalus_r[bn]
             for ncc in self.ncc_dict.keys():
@@ -712,15 +707,25 @@ class MassiveStarBuilder(DedalusMesaReader):
                 name = 'g'
                 self.ncc_dict['g']['field_{}'.format(bn)] = (-self.ncc_dict['neg_g']['field_{}'.format(bn)]).evaluate()
                 self.ncc_dict['g']['vector'] = True
-                self.ncc_dict['g']['interp_func'] = interpolations['g']
+                self.ncc_dict['g']['interp_func'] = self.interpolations['g']
                 self.ncc_dict['g']['Nmax_{}'.format(bn)] = self.ncc_dict['neg_g']['Nmax_{}'.format(bn)]
                 self.ncc_dict['g']['from_grad'] = True 
-            
-        
-        
-        interpolations['ln_rho0'] = interp1d(self.mesa_r_nd, np.log(self.rho/self.rho_nd), **interp_kwargs)
-        interpolations['ln_T0'] = interp1d(self.mesa_r_nd, np.log(self.T/self.T_nd), **interp_kwargs)
-        
+ 
+        #Adjust heating function so luminosity integrates to zero when appropriate.  
+        if not config.star['heat_only']:
+            integral = 0
+            for bn in self.bases.keys():
+                integral += d3.integ(self.ncc_dict['Q']['field_{}'.format(bn)])
+            C = integral.evaluate()['g']
+            vol = (4/3) * np.pi * (self.r_outer)**3
+            adj = C / vol
+            logger.info('adjusting dLdt for energy conservation; subtracting {} from H'.format(adj))
+            for bn in self.bases.keys():
+                self.ncc_dict['Q']['field_{}'.format(bn)]['g'] -= adj 
+
+    def plot_star(self):
+       
+        #Make plots of the NCCs
         if self.plot_nccs:
             for ncc in self.ncc_dict.keys():
                 if self.ncc_dict[ncc]['interp_func'] is None:
@@ -739,7 +744,7 @@ class MassiveStarBuilder(DedalusMesaReader):
                     else:
                         dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][0,0,:]))
         
-                interp_func = self.ncc_dict[ncc]['interp_func']
+                interp_func = self.mesa_interpolations[ncc]
                 if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad']:
                     log = True
                 if ncc == 'grad_s0': 
@@ -756,7 +761,7 @@ class MassiveStarBuilder(DedalusMesaReader):
                 elif ncc == 'grad_s0':
                     interp_func = interp1d(self.mesa_r_nd, (self.L_nd/self.s_nd) * self.grad_s, **interp_kwargs)
                 elif ncc in ['ln_T0', 'ln_rho0', 'grad_s0']:
-                    interp_func = interpolations[ncc]
+                    interp_func = self.interpolations[ncc]
         
                 if ncc in ['grad_T', 'grad_kappa_rad']:
                     interp_func = lambda r: -self.ncc_dict[ncc]['interp_func'](r)
@@ -806,7 +811,7 @@ class MassiveStarBuilder(DedalusMesaReader):
         grad_ln_rho0_dedalus = np.concatenate(grad_ln_rho0s, axis=-1).ravel()
         grad_ln_pom0_dedalus = np.concatenate(grad_ln_pom0s, axis=-1).ravel()
         plt.plot(self.mesa_r_nd, self.tau_nd**2*self.N2_mesa, label='mesa')
-        plt.plot(self.mesa_r_nd, atmo['N2'](self.mesa_r_nd), label='atmosphere')
+        plt.plot(self.mesa_r_nd, self.atmo['N2'](self.mesa_r_nd), label='atmosphere')
         plt.plot(r_dedalus, N2_dedalus, ls='--', label='dedalus')
         plt.legend()
         plt.ylabel(r'$N^2$')
@@ -844,21 +849,16 @@ class MassiveStarBuilder(DedalusMesaReader):
         plt.savefig('star/ln_thermo_goodness.png')
     #    plt.show()
 
+    def save_star(self):
 
+        # Get some timestepping & wave frequency info
+        f_nyq = 2*self.tau_nd*np.sqrt(self.mesa_N2_max_sim)/(2*np.pi)
+        nyq_dt   = (1/f_nyq) 
+        kepler_tau     = 30*60*u.s
+        max_dt_kepler  = kepler_tau/self.tau_nd
+        max_dt = max_dt_kepler
+        logger.info('needed nyq_dt is {} s / {} % of a nondimensional time (Kepler 30 min is {} %) '.format(nyq_dt*self.tau_nd, nyq_dt*100, max_dt_kepler*100))
            
-        if not config.star['heat_only']:
-            integral = 0
-            for bn in self.bases.keys():
-                integral += d3.integ(self.ncc_dict['Q']['field_{}'.format(bn)])
-            C = integral.evaluate()['g']
-            vol = (4/3) * np.pi * (self.r_outer)**3
-        #    C = d3.integ(self.ncc_dict['Q']['field_B']).evaluate()['g']
-        #    vol = (4/3)*np.pi * self.bases['B'].radius**3
-            adj = C / vol
-            logger.info('adjusting dLdt for energy conservation; subtracting {} from H'.format(adj))
-            for bn in self.bases.keys():
-                self.ncc_dict['Q']['field_{}'.format(bn)]['g'] -= adj 
-
     #    dLdt = d3.integ(4*np.pi*self.ncc_dict['H']['field_B']).evaluate()['g']
         
         with h5py.File('{:s}'.format(self.out_file), 'w') as f:
@@ -919,7 +919,7 @@ class MassiveStarBuilder(DedalusMesaReader):
 
             #TODO: put sim lum back
             f['lum_r_vals'] = lum_r_vals = np.linspace(self.nd_basis_bounds[0], self.r_outer, 1000)
-            f['sim_lum'] = (4*np.pi*lum_r_vals**2)*F_conv_func(lum_r_vals)
+            f['sim_lum'] = (4*np.pi*lum_r_vals**2)*self.F_conv_func(lum_r_vals)
             f['r_stitch']   = self.stitch_radii
             f['r_outer']   = self.r_outer 
             f['max_dt'] = max_dt
