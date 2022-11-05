@@ -5,6 +5,7 @@ star = OrderedDict()
 
 #path to MESA profile to load (searchings in $PATH and  d3_stars/stock_models
 star['path'] = 'zams_15Msol/LOGS/profile47.data'
+star['type'] = 'massive' #or 'dwarf' or 'envelope'
 
 #basis boundaries
 #Only works with L if you have core convection zone; how to generalize that?
