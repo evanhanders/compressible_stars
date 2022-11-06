@@ -467,12 +467,14 @@ class MdwarfBuilder(DedalusMesaReader):
         T_core  = self.T[0]
         self.H0      = (self.rho*self.eps_nuc)[0]
         self.tau_heat  = ((self.H0*self.L_CZ/m_core)**(-1/3)).cgs #heating timescale
+        self.tau_cp = np.sqrt(self.L_CZ**2 / (self.cp[0] * T_core))
 
         #Fundamental Nondimensionalization -- length (L_nd), mass (m_nd), temp (T_nd), time (tau_nd)
         self.L_nd    = self.L_CZ
         self.m_nd    = self.rho[self.r==self.L_nd][0] * self.L_nd**3 #mass at core cz boundary
         self.T_nd    = self.T[self.r==self.L_nd][0] #temp at core cz boundary
-        self.tau_nd  = self.tau_heat.cgs
+        self.tau_nd  = self.tau_cp.cgs
+#        self.tau_nd  = self.tau_heat.cgs
         logger.info('Nondimensionalization: L_nd = {:.2e}, T_nd = {:.2e}, m_nd = {:.2e}, tau_nd = {:.2e}'.format(self.L_nd, self.T_nd, self.m_nd, self.tau_nd))
 
         #Extra useful nondimensionalized quantities
