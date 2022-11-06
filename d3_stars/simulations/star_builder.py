@@ -122,8 +122,8 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func=None, Q
 
     namespace['pi'] = pi = np.pi
     locals().update(namespace)
-    ncc_cutoff=1e-6
-    tolerance=1e-6
+    ncc_cutoff=1e-12
+    tolerance=1e-10
     HSE_tolerance = 1e-1
 
     #Solve for ln_rho.
@@ -283,6 +283,10 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func=None, Q
     atmosphere['grad_ln_rho'] = interp1d(r, grad_ln_rho, **interp_kwargs)
     atmosphere['grad_s'] = interp1d(r, grad_s, **interp_kwargs)
     atmosphere['g'] = interp1d(r, g, **interp_kwargs)
+    if np.max(N2_func(r)) == 0:
+        atmosphere['grad_T0_superad'] = lambda r: 0*r
+    else:
+        atmosphere['grad_T0_superad'] = lambda r: atmosphere['grad_pomega'](r)/R - atmosphere['g'](r)/Cp
     atmosphere['pomega'] = interp1d(r, pom, **interp_kwargs)
     atmosphere['rho'] = interp1d(r, rho, **interp_kwargs)
     atmosphere['ln_rho'] = interp1d(r, ln_rho, **interp_kwargs)
@@ -617,6 +621,8 @@ class MdwarfBuilder(DedalusMesaReader):
         self.mesa_interpolations['s0'] = interp1d(self.mesa_r_nd, self.s_over_cp*self.cp  / self.s_nd, **interp_kwargs)
         self.mesa_interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
         self.mesa_interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
+        self.mesa_interpolations['grad_T0_superad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['grad_ln_T0'](self.mesa_r_nd)*self.mesa_interpolations['T0'](self.mesa_r_nd)  - \
+                                                                               self.mesa_interpolations['g'](self.mesa_r_nd)/(self.cp / self.s_nd).cgs)
         self.interpolations = self.mesa_interpolations.copy()
 
         #Solve hydrostatic equilibrium BVP for consistency with evolved equations.
@@ -638,6 +644,7 @@ class MdwarfBuilder(DedalusMesaReader):
         self.interpolations['s0'] = self.atmo['s0']
         self.interpolations['g'] = self.atmo['g']
         self.interpolations['g_phi'] = self.atmo['g_phi']
+        self.interpolations['grad_T0_superad'] = self.atmo['grad_T0_superad']
         self.interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
         self.interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
 

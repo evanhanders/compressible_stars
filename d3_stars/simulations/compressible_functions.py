@@ -54,7 +54,7 @@ class SphericalCompressibleProblem():
         self.scalar_fields = ['ln_rho1', 's1', 'Q', 'ones'] 
         self.vec_taus = ['tau_u']
         self.scalar_taus =  ['tau_s']
-        self.vec_nccs = ['grad_pom0', 'grad_ln_pom0', 'grad_ln_rho0', 'grad_s0', 'g', 'rvec', 'grad_nu_diff', 'grad_chi_rad', 'grad_kappa_rad']
+        self.vec_nccs = ['grad_pom0', 'grad_ln_pom0', 'grad_ln_rho0', 'grad_s0', 'g', 'rvec', 'grad_nu_diff', 'grad_chi_rad', 'grad_kappa_rad', 'grad_T0_superad']
         self.scalar_nccs = ['pom0', 'rho0', 'ln_rho0', 'g_phi', 'nu_diff', 'kappa_rad', 'chi_rad', 's0', 'inv_pom0']
         self.sphere_unit_vectors = ['ephi', 'etheta', 'er']
         self.cartesian_unit_vectors = ['ex', 'ey', 'ez']
@@ -265,7 +265,6 @@ class SphericalCompressibleProblem():
             self.namespace['grid_eye_{}'.format(bn)] = grid_eye = d3.Grid(eye).evaluate()
             self.namespace['grid_P0_{}'.format(bn)] = grid_P0 = d3.Grid(P0*ones).evaluate()
             self.namespace['grid_g_phi_{}'.format(bn)] = grid_g_phi = d3.Grid(ones*g_phi)
-            self.namespace['grid_T_ad_z_{}'.format(bn)] = grid_T_ad_z = d3.Grid(ones*grid_g/Cp).evaluate()
 
             for fname in ['rho0', 'ln_rho0', 'grad_ln_rho0', 's0', 'grad_s0', 'pom0', 'grad_pom0', 'g', 'chi_rad', 'grad_chi_rad', 'kappa_rad', 'grad_kappa_rad', 'inv_pom0', 'nu_diff', 'neg_one', 'eye', 'P0']:
                 self.namespace['grid_{}_{}'.format(fname, bn)].name = 'grid_{}_{}'.format(fname, bn)
@@ -357,7 +356,6 @@ class SphericalCompressibleProblem():
 
             #Radiative diffusivity -- we model flux as kappa * grad T1 (not including nonlinear part of T; it's low mach so it's fine.
             self.namespace['F_cond_{}'.format(bn)] = F_cond = -1*kappa_rad*((grad_pom1_RHS)/R_gas)
-            self.namespace['F_cond_superad_{}'.format(bn)] = F_cond = -1*kappa_rad*((grad_pom1_RHS)/R_gas)
           
 
             self.namespace['div_rad_flux_pt1_LHS_{}'.format(bn)] = div_rad_flux_pt1_LHS = grad_kappa_rad@(grad_pom1)
@@ -416,8 +414,9 @@ class SphericalCompressibleProblem():
             self.namespace['Ma_{}'.format(bn)] = np.sqrt(u_squared) / np.sqrt(pom_full) 
             self.namespace['L_{}'.format(bn)] = d3.cross(rvec, momentum)
 
-            self.namespace['T_superad_z_{}'.format(bn)] = T_superad_z = grad_pom_full/R_gas - grid_T_ad_z
-            self.namespace['T_superad1_z_{}'.format(bn)] = T_superad1_z = (grid_grad_pom0+ grad_pom1_RHS)/R_gas - grid_T_ad_z
+            grad_T0_superad = d3.Grid(self.namespace['grad_T0_superad_{}'.format(bn)]*ones).evaluate()
+            self.namespace['T_superad_z_{}'.format(bn)] = T_superad_z = grad_pom_full/R_gas  + grad_T0_superad
+            self.namespace['T_superad1_z_{}'.format(bn)] = T_superad1_z = grad_pom1_RHS/R_gas + grad_T0_superad
             self.namespace['F_cond_superad_{}'.format(bn)] = F_cond_superad = -1*kappa_rad*(T_superad1_z)
 
             #Fluxes
