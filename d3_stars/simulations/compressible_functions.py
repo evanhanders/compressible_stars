@@ -415,7 +415,7 @@ class SphericalCompressibleProblem():
             self.namespace['L_{}'.format(bn)] = d3.cross(rvec, momentum)
 
             grad_T0_superad = d3.Grid(self.namespace['grad_T0_superad_{}'.format(bn)]*ones).evaluate()
-            self.namespace['T_superad_z_{}'.format(bn)] = T_superad_z = grad_pom_full/R_gas  + grad_T0_superad
+            self.namespace['T_superad_z_{}'.format(bn)] = T_superad_z = grad_pom_fluc/R_gas + grad_T0_superad
             self.namespace['T_superad1_z_{}'.format(bn)] = T_superad1_z = grad_pom1_RHS/R_gas + grad_T0_superad
             self.namespace['F_cond_superad_{}'.format(bn)] = F_cond_superad = -1*kappa_rad*(T_superad1_z)
 
