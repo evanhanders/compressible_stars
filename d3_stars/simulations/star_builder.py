@@ -622,7 +622,7 @@ class MdwarfBuilder(DedalusMesaReader):
         self.mesa_interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
         self.mesa_interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
         self.mesa_interpolations['grad_T0_superad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['grad_ln_T0'](self.mesa_r_nd)*self.mesa_interpolations['T0'](self.mesa_r_nd)  - \
-                                                                               self.mesa_interpolations['g'](self.mesa_r_nd)/(self.cp / self.s_nd).cgs)
+                                                                               self.mesa_interpolations['g'](self.mesa_r_nd)/(self.cp / self.s_nd).cgs, **interp_kwargs)
         self.interpolations = self.mesa_interpolations.copy()
 
         #Solve hydrostatic equilibrium BVP for consistency with evolved equations.
@@ -765,8 +765,8 @@ class MdwarfBuilder(DedalusMesaReader):
 
         # Get some timestepping info
         max_dt = 0.05*self.tau_heat/self.tau_nd
+        # Save output fields.
         with h5py.File('{:s}'.format(self.out_file), 'w') as f:
-            # Save output fields.
             # slicing preserves dimensionality
             for bn, basis in self.bases.items():
                 f['r_{}'.format(bn)] = self.dedalus_r[bn]
@@ -880,6 +880,7 @@ class MassiveStarBuilder(DedalusMesaReader):
         T_core  = self.T[0]
         self.H0      = (self.rho*self.eps_nuc)[0]
         self.tau_heat  = ((self.H0*self.L_CZ/m_core)**(-1/3)).cgs #heating timescale
+        self.tau_cp = np.sqrt(self.L_CZ**2 / (self.cp[0] * T_core))
         max_f_brunt = np.sqrt(self.mesa_N2_max_sim)/(2*np.pi)
 
         #Fundamental Nondimensionalization -- length (L_nd), mass (m_nd), temp (T_nd), time (tau_nd)
@@ -887,7 +888,7 @@ class MassiveStarBuilder(DedalusMesaReader):
         self.m_nd    = self.rho[self.r==self.L_nd][0] * self.L_nd**3 #mass at core cz boundary
         self.T_nd    = self.T[self.r==self.L_nd][0] #temp at core cz boundary
         if self.cz_only:
-            self.tau_nd = self.tau_heat.cgs
+            self.tau_nd = self.tau_cp
         else:
             self.tau_nd  = (1/max_f_brunt).cgs #timescale of max N^2
         logger.info('Nondimensionalization: L_nd = {:.2e}, T_nd = {:.2e}, m_nd = {:.2e}, tau_nd = {:.2e}'.format(self.L_nd, self.T_nd, self.m_nd, self.tau_nd))
@@ -1024,6 +1025,8 @@ class MassiveStarBuilder(DedalusMesaReader):
         self.mesa_interpolations['s0'] = interp1d(self.mesa_r_nd, self.s_over_cp*self.cp  / self.s_nd, **interp_kwargs)
         self.mesa_interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
         self.mesa_interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
+        self.mesa_interpolations['grad_T0_superad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['grad_ln_T0'](self.mesa_r_nd)*self.mesa_interpolations['T0'](self.mesa_r_nd)  - \
+                                                                               self.mesa_interpolations['g'](self.mesa_r_nd)/(self.cp / self.s_nd).cgs, **interp_kwargs)
         self.interpolations = self.mesa_interpolations.copy()
 
         #Solve hydrostatic equilibrium BVP for consistency with evolved equations.
@@ -1045,6 +1048,7 @@ class MassiveStarBuilder(DedalusMesaReader):
         self.interpolations['s0'] = self.atmo['s0']
         self.interpolations['g'] = self.atmo['g']
         self.interpolations['g_phi'] = self.atmo['g_phi']
+        self.interpolations['grad_T0_superad'] = self.atmo['grad_T0_superad']
         self.interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
         self.interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
 
