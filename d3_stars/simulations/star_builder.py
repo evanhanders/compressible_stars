@@ -1494,7 +1494,7 @@ class EnvelopeStarBuilder(DedalusMesaReader):
             Q = Q_base(self.mesa_r_nd)
             cumsum = np.cumsum(Q*np.gradient(self.mesa_r_nd) * 4*np.pi*((self.mesa_r_nd)**2))
             first_adjust = np.copy(max_L / cumsum[self.mesa_domain_outer_bound_ind])
-            Q_func = lambda r: first_adjust * Q_base(r)
+            self.Q_func = lambda r: first_adjust * Q_base(r)
 
 #            plt.figure()
 #            Q_mesa = np.gradient(self.L_conv/self.lum_nd, self.mesa_r_nd) / (4*np.pi*self.mesa_r_nd**2)
