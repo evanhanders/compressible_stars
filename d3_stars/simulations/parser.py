@@ -12,7 +12,7 @@ def name_star(star_dir='star'):
     star_file += (len(config.star['nr'])*"{}+").format(*tuple(config.star['nr']))[:-1]
     if config.star['type'].lower() == 'massive':
         star_file += '_bounds{}-{}'.format(config.star['r_bounds'][0], config.star['r_bounds'][-1])
-    elif config.star['type'].lower() == 'dwarf':
+    elif config.star['type'].lower() == 'dwarf' or config.star['type'].lower() == 'envelope':
         star_file += '_nrho{}'.format(config.star['n_rho'])
     else:
         raise NotImplementedError()
