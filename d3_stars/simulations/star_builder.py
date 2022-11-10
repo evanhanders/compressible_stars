@@ -463,7 +463,67 @@ class DedalusMesaReader:
         pass
 
     def save_star(self):
-        pass
+        # Save output fields.
+        with h5py.File('{:s}'.format(self.out_file), 'w') as f:
+            # slicing preserves dimensionality
+            for bn, basis in self.bases.items():
+                f['r_{}'.format(bn)] = self.dedalus_r[bn]
+                for ncc in self.ncc_dict.keys():
+                    this_field = self.ncc_dict[ncc]['field_{}'.format(bn)]
+                    if self.ncc_dict[ncc]['vector']:
+                        f['{}_{}'.format(ncc, bn)] = this_field['g'][:, :1,:1,:]
+                        f['{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
+                    else:
+                        f['{}_{}'.format(ncc, bn)] = this_field['g'][:1,:1,:]
+                        f['{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
+        
+            f['Cp'] = self.cp_nd
+            f['R_gas'] = self.R_gas_nd
+            f['gamma1'] = self.gamma1_nd
+
+            #Save properties of the star, with units.
+            f['L_nd']   = self.L_nd
+            f['L_nd'].attrs['units'] = str(self.L_nd.unit)
+            f['rho_nd']  = self.rho_nd
+            f['rho_nd'].attrs['units']  = str(self.rho_nd.unit)
+            f['T_nd']  = self.T_nd
+            f['T_nd'].attrs['units']  = str(self.T_nd.unit)
+            f['tau_heat'] = self.tau_heat
+            f['tau_heat'].attrs['units'] = str(self.tau_heat.unit)
+            f['tau_nd'] = self.tau_nd 
+            f['tau_nd'].attrs['units'] = str(self.tau_nd.unit)
+            f['m_nd'] = self.m_nd 
+            f['m_nd'].attrs['units'] = str(self.m_nd.unit)
+            f['s_nd'] = self.s_nd
+            f['s_nd'].attrs['units'] = str(self.s_nd.unit)
+            f['P_r0']  = self.P[0]
+            f['P_r0'].attrs['units']  = str(self.P[0].unit)
+            f['H_nd']  = self.H_nd
+            f['H_nd'].attrs['units']  = str(self.H_nd.unit)
+            f['H0']  = self.H0
+            f['H0'].attrs['units']  = str(self.H0.unit)
+            f['cp_surf'] = self.cp[self.mesa_sim_bool][-1]
+            f['cp_surf'].attrs['units'] = str(self.cp[self.mesa_sim_bool][-1].unit)
+            f['r_mesa'] = self.r
+            f['r_mesa'].attrs['units'] = str(self.r.unit)
+            f['g_mesa'] = self.g 
+            f['g_mesa'].attrs['units'] = str(self.g.unit)
+            f['cp_mesa'] = self.cp
+            f['cp_mesa'].attrs['units'] = str(self.cp.unit)
+
+            #TODO: put sim lum back
+            f['lum_r_vals'] = lum_r_vals = np.linspace(self.nd_basis_bounds[0], self.r_outer, 1000)
+            f['sim_lum'] = (4*np.pi*lum_r_vals**2)*self.F_conv_func(lum_r_vals)
+            f['r_stitch']   = self.stitch_radii
+            f['r_outer']   = self.r_outer 
+            f['r_inner']   = self.r_inner
+            f['Ma2_r0'] = self.Ma2_r0
+            for k in ['r_stitch', 'r_inner', 'r_outer', 'Ma2_r0', 'lum_r_vals', 'sim_lum',\
+                        'Cp', 'R_gas', 'gamma1']:
+                f[k].attrs['units'] = 'dimensionless'
+        logger.info('finished saving NCCs to {}'.format(self.out_file))
+        logger.info('We recommend looking at the plots in {}/ to make sure the non-constant coefficients look reasonable'.format(self.out_dir))
+
 
 class MassiveStarBuilder(DedalusMesaReader):
 
@@ -871,6 +931,7 @@ class MassiveStarBuilder(DedalusMesaReader):
     #    plt.show()
 
     def save_star(self):
+        super().save_star()
 
         # Get some timestepping & wave frequency info
         f_nyq = 2*self.tau_nd*np.sqrt(self.mesa_N2_max_sim)/(2*np.pi)
@@ -879,77 +940,18 @@ class MassiveStarBuilder(DedalusMesaReader):
         max_dt_kepler  = kepler_tau/self.tau_nd
         max_dt = max_dt_kepler
         logger.info('needed nyq_dt is {} s / {} % of a nondimensional time (Kepler 30 min is {} %) '.format(nyq_dt*self.tau_nd, nyq_dt*100, max_dt_kepler*100))
-           
-    #    dLdt = d3.integ(4*np.pi*self.ncc_dict['H']['field_B']).evaluate()['g']
-        
-        with h5py.File('{:s}'.format(self.out_file), 'w') as f:
-            # Save output fields.
-            # slicing preserves dimensionality
-            for bn, basis in self.bases.items():
-                f['r_{}'.format(bn)] = self.dedalus_r[bn]
-                for ncc in self.ncc_dict.keys():
-                    this_field = self.ncc_dict[ncc]['field_{}'.format(bn)]
-                    if self.ncc_dict[ncc]['vector']:
-                        f['{}_{}'.format(ncc, bn)] = this_field['g'][:, :1,:1,:]
-                        f['{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
-                    else:
-                        f['{}_{}'.format(ncc, bn)] = this_field['g'][:1,:1,:]
-                        f['{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
-        
-            f['Cp'] = self.cp_nd
-            f['R_gas'] = self.R_gas_nd
-            f['gamma1'] = self.gamma1_nd
-
-            #Save properties of the star, with units.
-            f['L_nd']   = self.L_nd
-            f['L_nd'].attrs['units'] = str(self.L_nd.unit)
-            f['rho_nd']  = self.rho_nd
-            f['rho_nd'].attrs['units']  = str(self.rho_nd.unit)
-            f['T_nd']  = self.T_nd
-            f['T_nd'].attrs['units']  = str(self.T_nd.unit)
-            f['tau_heat'] = self.tau_heat
-            f['tau_heat'].attrs['units'] = str(self.tau_heat.unit)
-            f['tau_nd'] = self.tau_nd 
-            f['tau_nd'].attrs['units'] = str(self.tau_nd.unit)
-            f['m_nd'] = self.m_nd 
-            f['m_nd'].attrs['units'] = str(self.m_nd.unit)
-            f['s_nd'] = self.s_nd
-            f['s_nd'].attrs['units'] = str(self.s_nd.unit)
-            f['P_r0']  = self.P[0]
-            f['P_r0'].attrs['units']  = str(self.P[0].unit)
-            f['H_nd']  = self.H_nd
-            f['H_nd'].attrs['units']  = str(self.H_nd.unit)
-            f['H0']  = self.H0
-            f['H0'].attrs['units']  = str(self.H0.unit)
+        with h5py.File('{:s}'.format(self.out_file), 'a') as f:
             f['mesa_N2_max_sim'] = self.mesa_N2_max_sim
             f['mesa_N2_max_sim'].attrs['units'] = str(self.mesa_N2_max_sim.unit)
             f['mesa_N2_plateau'] = self.mesa_N2_plateau
             f['mesa_N2_plateau'].attrs['units'] = str(self.mesa_N2_plateau.unit)
-            f['cp_surf'] = self.cp[self.mesa_sim_bool][-1]
-            f['cp_surf'].attrs['units'] = str(self.cp[self.mesa_sim_bool][-1].unit)
-            f['r_mesa'] = self.r
-            f['r_mesa'].attrs['units'] = str(self.r.unit)
             f['N2_mesa'] = self.N2
             f['N2_mesa'].attrs['units'] = str(self.N2.unit)
             f['S1_mesa'] = self.lamb_freq(1)
             f['S1_mesa'].attrs['units'] = str(self.lamb_freq(1).unit)
-            f['g_mesa'] = self.g 
-            f['g_mesa'].attrs['units'] = str(self.g.unit)
-            f['cp_mesa'] = self.cp
-            f['cp_mesa'].attrs['units'] = str(self.cp.unit)
 
-            #TODO: put sim lum back
-            f['lum_r_vals'] = lum_r_vals = np.linspace(self.nd_basis_bounds[0], self.r_outer, 1000)
-            f['sim_lum'] = (4*np.pi*lum_r_vals**2)*self.F_conv_func(lum_r_vals)
-            f['r_stitch']   = self.stitch_radii
-            f['r_outer']   = self.r_outer 
             f['max_dt'] = max_dt
-            f['Ma2_r0'] = self.Ma2_r0
-            for k in ['r_stitch', 'r_outer', 'max_dt', 'Ma2_r0', 'lum_r_vals', 'sim_lum',\
-                        'Cp', 'R_gas', 'gamma1']:
-                f[k].attrs['units'] = 'dimensionless'
-        logger.info('finished saving NCCs to {}'.format(self.out_file))
-        logger.info('We recommend looking at the plots in {}/ to make sure the non-constant coefficients look reasonable'.format(self.out_dir))
+            f['max_dt'].attrs['units'] = 'dimensionless'
 
 class MdwarfBuilder(DedalusMesaReader):
 
@@ -1268,69 +1270,12 @@ class MdwarfBuilder(DedalusMesaReader):
                             r_int=self.stitch_radii, axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
 
     def save_star(self):
-
-        # Get some timestepping info
+        super().save_star()
+        # Get some timestepping & wave frequency info
         max_dt = 0.05*self.tau_heat/self.tau_nd
-        # Save output fields.
-        with h5py.File('{:s}'.format(self.out_file), 'w') as f:
-            # slicing preserves dimensionality
-            for bn, basis in self.bases.items():
-                f['r_{}'.format(bn)] = self.dedalus_r[bn]
-                for ncc in self.ncc_dict.keys():
-                    this_field = self.ncc_dict[ncc]['field_{}'.format(bn)]
-                    if self.ncc_dict[ncc]['vector']:
-                        f['{}_{}'.format(ncc, bn)] = this_field['g'][:, :1,:1,:]
-                        f['{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
-                    else:
-                        f['{}_{}'.format(ncc, bn)] = this_field['g'][:1,:1,:]
-                        f['{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
-        
-            f['Cp'] = self.cp_nd
-            f['R_gas'] = self.R_gas_nd
-            f['gamma1'] = self.gamma1_nd
-
-            #Save properties of the star, with units.
-            f['L_nd']   = self.L_nd
-            f['L_nd'].attrs['units'] = str(self.L_nd.unit)
-            f['rho_nd']  = self.rho_nd
-            f['rho_nd'].attrs['units']  = str(self.rho_nd.unit)
-            f['T_nd']  = self.T_nd
-            f['T_nd'].attrs['units']  = str(self.T_nd.unit)
-            f['tau_heat'] = self.tau_heat
-            f['tau_heat'].attrs['units'] = str(self.tau_heat.unit)
-            f['tau_nd'] = self.tau_nd 
-            f['tau_nd'].attrs['units'] = str(self.tau_nd.unit)
-            f['m_nd'] = self.m_nd 
-            f['m_nd'].attrs['units'] = str(self.m_nd.unit)
-            f['s_nd'] = self.s_nd
-            f['s_nd'].attrs['units'] = str(self.s_nd.unit)
-            f['P_r0']  = self.P[0]
-            f['P_r0'].attrs['units']  = str(self.P[0].unit)
-            f['H_nd']  = self.H_nd
-            f['H_nd'].attrs['units']  = str(self.H_nd.unit)
-            f['H0']  = self.H0
-            f['H0'].attrs['units']  = str(self.H0.unit)
-            f['cp_surf'] = self.cp[self.mesa_sim_bool][-1]
-            f['cp_surf'].attrs['units'] = str(self.cp[self.mesa_sim_bool][-1].unit)
-            f['r_mesa'] = self.r
-            f['r_mesa'].attrs['units'] = str(self.r.unit)
-            f['g_mesa'] = self.g 
-            f['g_mesa'].attrs['units'] = str(self.g.unit)
-            f['cp_mesa'] = self.cp
-            f['cp_mesa'].attrs['units'] = str(self.cp.unit)
-
-            #TODO: put sim lum back
-            f['lum_r_vals'] = lum_r_vals = np.linspace(self.nd_basis_bounds[0], self.r_outer, 1000)
-            f['sim_lum'] = (4*np.pi*lum_r_vals**2)*self.F_conv_func(lum_r_vals)
-            f['r_stitch']   = self.stitch_radii
-            f['r_outer']   = self.r_outer 
+        with h5py.File('{:s}'.format(self.out_file), 'a') as f:
             f['max_dt'] = max_dt
-            f['Ma2_r0'] = self.Ma2_r0
-            for k in ['r_stitch', 'r_outer', 'max_dt', 'Ma2_r0', 'lum_r_vals', 'sim_lum',\
-                        'Cp', 'R_gas', 'gamma1']:
-                f[k].attrs['units'] = 'dimensionless'
-        logger.info('finished saving NCCs to {}'.format(self.out_file))
-        logger.info('We recommend looking at the plots in {}/ to make sure the non-constant coefficients look reasonable'.format(self.out_dir))
+            f['max_dt'].attrs['units'] = 'dimensionless'
 
 
 class EnvelopeStarBuilder(DedalusMesaReader):
@@ -1670,73 +1615,12 @@ class EnvelopeStarBuilder(DedalusMesaReader):
                             r_int=self.stitch_radii, axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
 
     def save_star(self):
-
+        super().save_star()
         # Get some timestepping info
         max_dt = 0.05*self.tau_heat/self.tau_nd
-        # Save output fields.
-        with h5py.File('{:s}'.format(self.out_file), 'w') as f:
-            # slicing preserves dimensionality
-            for bn, basis in self.bases.items():
-                f['r_{}'.format(bn)] = self.dedalus_r[bn]
-                for ncc in self.ncc_dict.keys():
-                    this_field = self.ncc_dict[ncc]['field_{}'.format(bn)]
-                    if self.ncc_dict[ncc]['vector']:
-                        f['{}_{}'.format(ncc, bn)] = this_field['g'][:, :1,:1,:]
-                        f['{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
-                    else:
-                        f['{}_{}'.format(ncc, bn)] = this_field['g'][:1,:1,:]
-                        f['{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
-        
-            f['Cp'] = self.cp_nd
-            f['R_gas'] = self.R_gas_nd
-            f['gamma1'] = self.gamma1_nd
-
-            #Save properties of the star, with units.
-            f['L_nd']   = self.L_nd
-            f['L_nd'].attrs['units'] = str(self.L_nd.unit)
-            f['rho_nd']  = self.rho_nd
-            f['rho_nd'].attrs['units']  = str(self.rho_nd.unit)
-            f['T_nd']  = self.T_nd
-            f['T_nd'].attrs['units']  = str(self.T_nd.unit)
-            f['tau_heat'] = self.tau_heat
-            f['tau_heat'].attrs['units'] = str(self.tau_heat.unit)
-            f['tau_nd'] = self.tau_nd 
-            f['tau_nd'].attrs['units'] = str(self.tau_nd.unit)
-            f['m_nd'] = self.m_nd 
-            f['m_nd'].attrs['units'] = str(self.m_nd.unit)
-            f['s_nd'] = self.s_nd
-            f['s_nd'].attrs['units'] = str(self.s_nd.unit)
-            f['P_r0']  = self.P[0]
-            f['P_r0'].attrs['units']  = str(self.P[0].unit)
-            f['H_nd']  = self.H_nd
-            f['H_nd'].attrs['units']  = str(self.H_nd.unit)
-            f['H0']  = self.H0
-            f['H0'].attrs['units']  = str(self.H0.unit)
-            f['cp_surf'] = self.cp[self.mesa_sim_bool][-1]
-            f['cp_surf'].attrs['units'] = str(self.cp[self.mesa_sim_bool][-1].unit)
-            f['r_mesa'] = self.r
-            f['r_mesa'].attrs['units'] = str(self.r.unit)
-            f['g_mesa'] = self.g 
-            f['g_mesa'].attrs['units'] = str(self.g.unit)
-            f['cp_mesa'] = self.cp
-            f['cp_mesa'].attrs['units'] = str(self.cp.unit)
-
-            #TODO: put sim lum back
-            f['lum_r_vals'] = lum_r_vals = np.linspace(self.nd_basis_bounds[0], self.r_outer, 1000)
-            f['sim_lum'] = (4*np.pi*lum_r_vals**2)*self.F_conv_func(lum_r_vals)
-            f['r_inner']   = self.r_inner
-            f['r_stitch']   = self.stitch_radii
-            f['r_outer']   = self.r_outer 
+        with h5py.File('{:s}'.format(self.out_file), 'a') as f:
             f['max_dt'] = max_dt
-            f['Ma2_r0'] = self.Ma2_r0
-            for k in ['r_stitch', 'r_outer', 'r_inner', 'max_dt', 'Ma2_r0', 'lum_r_vals', 'sim_lum',\
-                        'Cp', 'R_gas', 'gamma1']:
-                f[k].attrs['units'] = 'dimensionless'
-        logger.info('finished saving NCCs to {}'.format(self.out_file))
-        logger.info('We recommend looking at the plots in {}/ to make sure the non-constant coefficients look reasonable'.format(self.out_dir))
-
-
-
+            f['max_dt'].attrs['units'] = 'dimensionless'
 
 
 
