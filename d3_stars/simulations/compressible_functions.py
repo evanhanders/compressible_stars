@@ -451,6 +451,11 @@ class SphericalCompressibleProblem():
             self.namespace['source_KE_{}'.format(bn)] = visc_source_KE + PdV_source_KE #g term turns into dt(PE) + div(u*PE); do not include here while trying to solve for dt(KE) + div(u*KE).
             self.namespace['source_IE_{}'.format(bn)] = visc_source_IE + PdV_source_IE + Q_source + divRad_source
             self.namespace['tot_source_{}'.format(bn)] = self.namespace['source_KE_{}'.format(bn)] + self.namespace['source_IE_{}'.format(bn)]
+
+            s_prime = s1/(pom_full/grid_R)
+            self.namespace['therm_diss_1_{}'.format(bn)] = therm_diss_1 = F_cond@d3.grad(s_prime)
+            self.namespace['therm_diss_2_{}'.format(bn)] = therm_diss_2 = s_prime*visc_source_IE
+            self.namespace['therm_diss_3_{}'.format(bn)] = therm_diss_3 = s_prime*Q_source
         return self.namespace
 
     def fill_structure(self, scales=None):

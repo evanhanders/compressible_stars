@@ -1501,11 +1501,11 @@ class EnvelopeStarBuilder(DedalusMesaReader):
 #            plt.plot(self.mesa_r_nd, Q_mesa)
 #            plt.plot(self.mesa_r_nd, self.Q_func(self.mesa_r_nd))
 #            plt.yscale('log')
-#            plt.xlim(0, 1)
+#            plt.xlim(3, 4.5)
 #            plt.figure()
 #            plt.plot(self.mesa_r_nd, np.cumsum(4*np.pi*self.mesa_r_nd**2*np.gradient(self.mesa_r_nd)*self.Q_func(self.r/self.L_nd)))
 #            plt.plot(self.mesa_r_nd, self.L_conv/self.lum_nd)
-#            plt.xlim(0, 1)
+#            plt.xlim(3, 4.5)
 #            plt.show()
         else:
             raise NotImplementedError("must use smooth_h or heat_only")
