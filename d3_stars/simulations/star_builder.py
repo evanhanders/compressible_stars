@@ -394,7 +394,17 @@ def make_NCC(basis, coords, dist, interp_func, Nmax=32, vector=False, grid_only=
 
 class DedalusMesaReader:
 
-    def __init__(self):
+    def __init__(self, plot_nccs=False):
+        self.plot_nccs=plot_nccs
+        self.out_dir, self.out_file = name_star()
+        self.ncc_dict = config.nccs.copy()
+        self.cz_only = config.star['cz_only']
+
+        self.read_mesa_file()
+        self.specify_domain_and_nondimensionalization()
+        self.build_bases() 
+
+    def read_mesa_file(self):
         package_path = Path(d3_stars.__file__).resolve().parent
         stock_path = package_path.joinpath('stock_models')
         mesa_file_path = None
@@ -582,8 +592,31 @@ class DedalusMesaReader:
                 self.ncc_dict['Q']['field_{}'.format(bn)]['g'] -= adj 
 
 
-    def customize_star(self):
+    def specify_g_phi(self):
+        #Adjust gravitational potential so that it doesn't cross zero somewhere wonky
+        self.g_phi           -= self.g_phi[-1] - self.u_nd**2 #set g_phi = -1 at r = R_star
+
+    def specify_diffusivities(self):
+        #Construct simulation diffusivity profiles -- MANY CHOICES COULD BE MADE HERE!!
+        self.mesa_rad_diff_nd = self.rad_diff * (self.tau_nd / self.L_nd**2)
+        self.rad_diff_cutoff_nd = (1/(config.numerics['prandtl']*config.numerics['reynolds_target'])) * ((self.L_CZ**2/self.tau_heat) / (self.L_nd**2/self.tau_nd))
+        self.simulation_rad_diff_nd = np.copy(self.mesa_rad_diff_nd) + self.rad_diff_cutoff_nd
+        self.simulation_visc_diff_nd = config.numerics['prandtl']*self.rad_diff_cutoff_nd*np.ones_like(self.simulation_rad_diff_nd)
+        logger.info('rad_diff cutoff: {:.3e}'.format(self.rad_diff_cutoff_nd))
+ 
+    def specify_N2_func(self):        
         pass
+
+    def specify_Q_func(self):        
+        pass
+
+
+    def customize_star(self):
+        self.specify_g_phi()
+        self.specify_diffusivities()
+        self.specify_N2_func()
+        self.specify_Q_func()
+        self.ncc_builder()
 
     def plot_star(self):
         #Make plots of the NCCs
@@ -708,10 +741,8 @@ class MassiveStarBuilder(DedalusMesaReader):
     def __init__(self, plot_nccs=False):
         """ Create nondimensionalization and Dedalus domain / bases. """
         super().__init__()
-        self.plot_nccs = plot_nccs
-        self.out_dir, self.out_file = name_star()
-        self.ncc_dict = config.nccs.copy()
 
+    def specify_domain_and_nondimensionalization(self):
         # Find edge of core cz
         self.mesa_core_bool = (self.L_conv.value > 1)*(self.mass < 0.9*self.mass[-1]) #rudimentary but works
         self.mesa_core_bound_ind  = np.argmin(np.abs(self.mass - self.mass[self.mesa_core_bool][-1]))
@@ -781,20 +812,7 @@ class MassiveStarBuilder(DedalusMesaReader):
         logger.info('m_nd/M_\odot: {:.3f}'.format((self.m_nd/constants.M_sun).cgs))
         logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(self.Ma2_r0), self.tau_heat))
 
-        self.build_bases() 
-
-    def customize_star(self):
-
-        #Adjust gravitational potential so that it doesn't cross zero somewhere wonky
-        self.g_phi           -= self.g_phi[-1] - self.u_nd**2 #set g_phi = -1 at r = R_star
-
-        #Construct simulation diffusivity profiles -- MANY CHOICES COULD BE MADE HERE!!
-        self.mesa_rad_diff_nd = self.rad_diff * (self.tau_nd / self.L_nd**2)
-        self.rad_diff_cutoff_nd = (1/(config.numerics['prandtl']*config.numerics['reynolds_target'])) * ((self.L_CZ**2/self.tau_heat) / (self.L_nd**2/self.tau_nd))
-        self.simulation_rad_diff_nd = np.copy(self.mesa_rad_diff_nd) + self.rad_diff_cutoff_nd
-        self.simulation_visc_diff_nd = config.numerics['prandtl']*self.rad_diff_cutoff_nd*np.ones_like(self.simulation_rad_diff_nd)
-        logger.info('rad_diff cutoff: {:.3e}'.format(self.rad_diff_cutoff_nd))
-        
+    def specify_N2_func(self):        
         ### entropy gradient
         if self.cz_only:
             #Entropy gradient is zero everywhere
@@ -822,6 +840,12 @@ class MassiveStarBuilder(DedalusMesaReader):
             smooth_N2 *= zero_to_one(r/self.L_nd, grad_s_transition_point, width=grad_s_width)
             self.N2_func = interp1d(self.mesa_r_nd, self.tau_nd**2 * smooth_N2, **interp_kwargs)
 
+
+    def customize_star(self):
+        super().customize_star()
+       
+
+    def specify_Q_func(self):        
         ### Internal heating / cooling function
         interp_r = np.linspace(0, 1, 1000)
         if config.star['smooth_h']:
@@ -859,8 +883,6 @@ class MassiveStarBuilder(DedalusMesaReader):
             self.Q_func = lambda r: first_adjust * Q_base(r)
         else:
             raise NotImplementedError("must use smooth_h or heat_only")
-
-        self.ncc_builder()
 
     def plot_star(self):
         super().plot_star()
@@ -964,10 +986,8 @@ class MdwarfBuilder(DedalusMesaReader):
     def __init__(self, plot_nccs=False):
         """ Create nondimensionalization and Dedalus domain / bases. """
         super().__init__()
-        self.plot_nccs = plot_nccs
-        self.out_dir, self.out_file = name_star()
-        self.ncc_dict = config.nccs.copy()
-        self.cz_only = config.star['cz_only']
+
+    def specify_domain_and_nondimensionalization(self):
 
         # Find edge of dedalus domain
         core_rho = self.rho[0]
@@ -1011,46 +1031,20 @@ class MdwarfBuilder(DedalusMesaReader):
         logger.info('m_nd/M_\odot: {:.3f}'.format((self.m_nd/constants.M_sun).cgs))
         logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(self.Ma2_r0), self.tau_heat))
 
-        self.build_bases() 
-
-    def customize_star(self):
-        #Adjust gravitational potential so that it doesn't cross zero somewhere wonky
-        self.g_phi           -= self.g_phi[-1] - self.u_nd**2 #set g_phi = -1 at r = R_star
-
-        #Construct simulation diffusivity profiles -- MANY CHOICES COULD BE MADE HERE!!
-        self.mesa_rad_diff_nd = self.rad_diff * (self.tau_nd / self.L_nd**2)
-        self.rad_diff_cutoff_nd = (1/(config.numerics['prandtl']*config.numerics['reynolds_target'])) * ((self.L_CZ**2/self.tau_heat) / (self.L_nd**2/self.tau_nd))
-        self.simulation_rad_diff_nd = np.copy(self.mesa_rad_diff_nd) + self.rad_diff_cutoff_nd
-        self.simulation_visc_diff_nd = config.numerics['prandtl']*self.rad_diff_cutoff_nd*np.ones_like(self.simulation_rad_diff_nd)
-        logger.info('rad_diff cutoff: {:.3e}'.format(self.rad_diff_cutoff_nd))
-        
+    def specify_N2_func(self):        
         ### entropy gradient
         if self.cz_only:
             #Entropy gradient is zero everywhere
             grad_s_smooth = np.zeros_like(self.grad_s)
             self.N2_func = interp1d(self.mesa_r_nd, np.zeros_like(grad_s_smooth), **interp_kwargs)
         else:
-            #Build a smooth function in the ball, match the star in the shells.
-            grad_s_width = 0.05
-            grad_s_transition_point = self.nd_basis_bounds[1] - grad_s_width
-            logger.info('using default grad s transition point = {}'.format(grad_s_transition_point))
-            logger.info('using default grad s width = {}'.format(grad_s_width))
-            grad_s_center =  grad_s_transition_point - 0.5*grad_s_width
-            grad_s_width *= (self.L_CZ/self.L_nd).value
-            grad_s_center *= (self.L_CZ/self.L_nd).value
-           
-            grad_s_smooth = np.copy(self.grad_s)
-            flat_value  = np.interp(grad_s_transition_point, self.mesa_r_nd, self.grad_s)
-            grad_s_smooth += (self.mesa_r_nd)**2 *  flat_value
-            grad_s_smooth *= zero_to_one(self.mesa_r_nd, grad_s_transition_point, width=grad_s_width)
+            raise NotImplementedError("cz_only must be true for M dwarf")
 
-            #construct N2 function #TODO: blend logic here & in BVP?
-            smooth_N2 = np.copy(self.N2_mesa)
-            stitch_value = np.interp(self.bases['B'].radius, r/self.L_nd, self.N2_mesa)
-            smooth_N2[r/self.L_nd < self.bases['B'].radius] = (r[r/self.L_nd < self.bases['B'].radius]/self.L_nd / self.bases['B'].radius)**2 * stitch_value
-            smooth_N2 *= zero_to_one(r/self.L_nd, grad_s_transition_point, width=grad_s_width)
-            self.N2_func = interp1d(self.mesa_r_nd, self.tau_nd**2 * smooth_N2, **interp_kwargs)
 
+    def customize_star(self):
+        super().customize_star()
+
+    def specify_Q_func(self):        
         ### Internal heating / cooling function
         interp_r = np.linspace(0, 1, 1000)
         if config.star['smooth_h']:
@@ -1099,9 +1093,6 @@ class MdwarfBuilder(DedalusMesaReader):
         else:
             raise NotImplementedError("must use smooth_h or heat_only")
 
-        self.ncc_builder()
-
-
     def plot_star(self):
         super().plot_star()
 
@@ -1119,11 +1110,8 @@ class EnvelopeStarBuilder(DedalusMesaReader):
     def __init__(self, plot_nccs=False):
         """ Create nondimensionalization and Dedalus domain / bases. """
         super().__init__()
-        self.plot_nccs = plot_nccs
-        self.out_dir, self.out_file = name_star()
-        self.ncc_dict = config.nccs.copy()
-        self.cz_only = config.star['cz_only']
 
+    def specify_domain_and_nondimensionalization(self):
         # Find edges of dedalus domain
         self.mesa_conv_bool = self.conv_L_div_L > 1e-6
         ln_rho = np.log(self.rho/self.rho[0])
@@ -1172,46 +1160,16 @@ class EnvelopeStarBuilder(DedalusMesaReader):
         logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(self.Ma2_r0), self.tau_heat))
 
 
-        self.build_bases() 
-
-    def customize_star(self):
-        #Adjust gravitational potential so that it doesn't cross zero somewhere wonky
-        self.g_phi           -= self.g_phi[-1] - self.u_nd**2 #set g_phi = -1 at r = R_star
-
-        #Construct simulation diffusivity profiles -- MANY CHOICES COULD BE MADE HERE!!
-        self.mesa_rad_diff_nd = self.rad_diff * (self.tau_nd / self.L_nd**2)
-        self.rad_diff_cutoff_nd = (1/(config.numerics['prandtl']*config.numerics['reynolds_target'])) * ((self.L_CZ**2/self.tau_heat) / (self.L_nd**2/self.tau_nd))
-        self.simulation_rad_diff_nd = np.copy(self.mesa_rad_diff_nd) + self.rad_diff_cutoff_nd
-        self.simulation_visc_diff_nd = config.numerics['prandtl']*self.rad_diff_cutoff_nd*np.ones_like(self.simulation_rad_diff_nd)
-        logger.info('rad_diff cutoff: {:.3e}'.format(self.rad_diff_cutoff_nd))
-        
+    def specify_N2_func(self):        
         ### entropy gradient
         if self.cz_only:
             #Entropy gradient is zero everywhere
             grad_s_smooth = np.zeros_like(self.grad_s)
             self.N2_func = interp1d(self.mesa_r_nd, np.zeros_like(grad_s_smooth), **interp_kwargs)
         else:
-            #Build a smooth function in the ball, match the star in the shells.
-            grad_s_width = 0.05
-            grad_s_transition_point = self.nd_basis_bounds[1] - grad_s_width
-            logger.info('using default grad s transition point = {}'.format(grad_s_transition_point))
-            logger.info('using default grad s width = {}'.format(grad_s_width))
-            grad_s_center =  grad_s_transition_point - 0.5*grad_s_width
-            grad_s_width *= (self.L_CZ/self.L_nd).value
-            grad_s_center *= (self.L_CZ/self.L_nd).value
-           
-            grad_s_smooth = np.copy(self.grad_s)
-            flat_value  = np.interp(grad_s_transition_point, self.mesa_r_nd, self.grad_s)
-            grad_s_smooth += (self.mesa_r_nd)**2 *  flat_value
-            grad_s_smooth *= zero_to_one(self.mesa_r_nd, grad_s_transition_point, width=grad_s_width)
+            raise NotImplementedError("radiative zones are not implemented for envelope stars")
 
-            #construct N2 function #TODO: blend logic here & in BVP?
-            smooth_N2 = np.copy(self.N2_mesa)
-            stitch_value = np.interp(self.bases['B'].radius, r/self.L_nd, self.N2_mesa)
-            smooth_N2[r/self.L_nd < self.bases['B'].radius] = (r[r/self.L_nd < self.bases['B'].radius]/self.L_nd / self.bases['B'].radius)**2 * stitch_value
-            smooth_N2 *= zero_to_one(r/self.L_nd, grad_s_transition_point, width=grad_s_width)
-            self.N2_func = interp1d(self.mesa_r_nd, self.tau_nd**2 * smooth_N2, **interp_kwargs)
-
+    def specify_Q_func(self):
         ### Internal heating / cooling function
         interp_r = np.linspace(self.r_inner, self.r_outer, 1000)
         if config.star['smooth_h']:
@@ -1274,7 +1232,10 @@ class EnvelopeStarBuilder(DedalusMesaReader):
         else:
             raise NotImplementedError("must use smooth_h or heat_only")
 
-        self.ncc_builder()
+
+
+    def customize_star(self):
+        super().customize_star()
 
     def plot_star(self):
         super().plot_star()
