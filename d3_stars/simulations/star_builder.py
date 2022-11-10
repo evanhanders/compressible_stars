@@ -456,11 +456,189 @@ class DedalusMesaReader:
         self.g_phi           = np.cumsum(self.g*np.gradient(self.r))  #gvec = -grad phi; 
         self.s_over_cp       = np.cumsum(self.grad_s_over_cp*np.gradient(self.r))
 
+
+    def build_bases(self):
+        #MESA radial values at simulation joints & across full star in simulation units
+        self.mesa_r_nd = (self.r/self.L_nd).cgs
+        self.nd_basis_bounds = [(rb/self.L_nd).value for rb in self.mesa_basis_bounds]
+        self.r_inner = self.nd_basis_bounds[0]
+        self.r_outer = self.nd_basis_bounds[-1]
+      
+        ### Make dedalus domain and bases
+        self.resolutions = [(1, 1, nr) for nr in config.star['nr']]
+        self.stitch_radii = self.nd_basis_bounds[1:-1]
+        self.dtype=np.float64
+        mesh=None
+        dealias = config.numerics['N_dealias']
+        self.coords, self.dist, self.bases, self.bases_keys = make_bases(self.resolutions, self.stitch_radii, self.r_outer, r_inner=self.r_inner, dealias=(1,1,dealias), dtype=self.dtype, mesh=mesh)
+        self.dedalus_r = OrderedDict()
+        for bn in self.bases.keys():
+            phi, theta, r_vals = self.bases[bn].global_grids((1, 1, dealias))
+            self.dedalus_r[bn] = r_vals
+
+    def ncc_builder(self):
+        # Create interpolations of the various fields that may be used in the problem
+        self.mesa_interpolations = OrderedDict()
+        self.mesa_interpolations['ln_rho0'] = interp1d(self.mesa_r_nd, np.log(self.rho/self.rho_nd), **interp_kwargs)
+        self.mesa_interpolations['rho0'] = lambda r: np.exp(self.mesa_interpolations['ln_rho0'](r))
+        self.mesa_interpolations['ln_T0'] = interp1d(self.mesa_r_nd, np.log(self.T/self.T_nd), **interp_kwargs)
+        self.mesa_interpolations['Q'] = interp1d(self.mesa_r_nd, (1/(4*np.pi*self.mesa_r_nd**2))*np.gradient(self.L_conv/self.lum_nd, self.mesa_r_nd), **interp_kwargs)
+        self.mesa_interpolations['grad_ln_rho0'] = interp1d(self.mesa_r_nd, self.dlogrhodr*self.L_nd, **interp_kwargs)
+        self.mesa_interpolations['grad_ln_T0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
+        self.mesa_interpolations['grad_ln_pom0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
+        self.mesa_interpolations['T0'] = interp1d(self.mesa_r_nd, self.T/self.T_nd, **interp_kwargs)
+        self.mesa_interpolations['pom0'] = interp1d(self.mesa_r_nd, self.R_gas_nd * self.T/self.T_nd, **interp_kwargs)
+        self.mesa_interpolations['nu_diff'] = interp1d(self.mesa_r_nd, self.simulation_visc_diff_nd, **interp_kwargs)
+        self.mesa_interpolations['chi_rad'] = interp1d(self.mesa_r_nd, self.simulation_rad_diff_nd, **interp_kwargs)
+        self.mesa_interpolations['grad_chi_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_rad_diff_nd, self.mesa_r_nd), **interp_kwargs)
+        self.mesa_interpolations['g'] = interp1d(self.mesa_r_nd, -self.g * (self.tau_nd**2/self.L_nd), **interp_kwargs)
+        self.mesa_interpolations['g_phi'] = interp1d(self.mesa_r_nd, self.g_phi * (self.tau_nd**2 / self.L_nd**2), **interp_kwargs)
+        self.mesa_interpolations['grad_s0'] = interp1d(self.mesa_r_nd, self.grad_s_over_cp*self.cp * (self.L_nd/self.s_nd), **interp_kwargs)
+        self.mesa_interpolations['s0'] = interp1d(self.mesa_r_nd, self.s_over_cp*self.cp  / self.s_nd, **interp_kwargs)
+        self.mesa_interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
+        self.mesa_interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
+        self.mesa_interpolations['grad_T0_superad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['grad_ln_T0'](self.mesa_r_nd)*self.mesa_interpolations['T0'](self.mesa_r_nd)  - \
+                                                                               self.mesa_interpolations['g'](self.mesa_r_nd)/(self.cp / self.s_nd).cgs, **interp_kwargs)
+        self.interpolations = self.mesa_interpolations.copy()
+
+        #Solve hydrostatic equilibrium BVP for consistency with evolved equations.
+        ln_rho_func = self.interpolations['ln_rho0']
+        grad_ln_rho_func = self.interpolations['grad_ln_rho0']
+        self.atmo = HSE_solve(self.coords, self.dist, self.bases,  grad_ln_rho_func, self.N2_func, Q_func=self.Q_func,
+                  r_outer=self.r_outer, r_stitch=self.stitch_radii, dtype=self.dtype, \
+                  R=self.R_gas_nd, gamma=self.gamma1_nd, comm=MPI.COMM_SELF, \
+                  nondim_radius=self.r_outer, g_nondim=self.interpolations['g'](1), s_motions=self.s_motions/self.s_nd)
+
+        #Update self.interpolations of important quantities from HSE BVP
+        self.F_conv_func = self.atmo['Fconv']
+        self.interpolations['ln_rho0'] = self.atmo['ln_rho']
+        self.interpolations['rho0'] = lambda r: np.exp(self.interpolations['ln_rho0'](r))
+        self.interpolations['Q'] = self.Q_func
+        self.interpolations['grad_s0'] = self.atmo['grad_s']
+        self.interpolations['pom0'] = self.atmo['pomega']
+        self.interpolations['grad_ln_pom0'] = self.atmo['grad_ln_pomega']
+        self.interpolations['s0'] = self.atmo['s0']
+        self.interpolations['g'] = self.atmo['g']
+        self.interpolations['g_phi'] = self.atmo['g_phi']
+        self.interpolations['grad_T0_superad'] = self.atmo['grad_T0_superad']
+        self.interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
+        self.interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
+
+        #Prep NCCs for construction.
+        for ncc in self.ncc_dict.keys():
+            for i, bn in enumerate(self.bases.keys()):
+                self.ncc_dict[ncc]['Nmax_{}'.format(bn)] = self.ncc_dict[ncc]['nr_max'][i]
+                self.ncc_dict[ncc]['field_{}'.format(bn)] = None
+            if ncc in self.interpolations.keys():
+                self.ncc_dict[ncc]['interp_func'] = self.interpolations[ncc]
+            else:
+                self.ncc_dict[ncc]['interp_func'] = None
+
+        #Construct NCCs
+        for bn, basis in self.bases.items():
+            rvals = self.dedalus_r[bn]
+            for ncc in self.ncc_dict.keys():
+                interp_func = self.ncc_dict[ncc]['interp_func']
+                if interp_func is not None and not self.ncc_dict[ncc]['from_grad']:
+                    Nmax = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]
+                    vector = self.ncc_dict[ncc]['vector']
+                    grid_only = self.ncc_dict[ncc]['grid_only']
+                    self.ncc_dict[ncc]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, interp_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
+                    if self.ncc_dict[ncc]['get_grad']:
+                        name = self.ncc_dict[ncc]['grad_name']
+                        logger.info('getting {}'.format(name))
+                        grad_field = d3.grad(self.ncc_dict[ncc]['field_{}'.format(bn)]).evaluate()
+                        grad_field.change_scales((1,1,(Nmax+1)/self.resolutions[self.bases_keys == bn][2]))
+                        grad_field.change_scales(basis.dealias)
+                        self.ncc_dict[name]['field_{}'.format(bn)] = grad_field
+                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax+1
+                    if self.ncc_dict[ncc]['get_inverse']:
+                        name = 'inv_{}'.format(ncc)
+                        inv_func = lambda r: 1/interp_func(r)
+                        self.ncc_dict[name]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, inv_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
+                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax
+
+
+            if 'neg_g' in self.ncc_dict.keys():
+                if 'g' not in self.ncc_dict.keys():
+                    self.ncc_dict['g'] = OrderedDict()
+                name = 'g'
+                self.ncc_dict['g']['field_{}'.format(bn)] = (-self.ncc_dict['neg_g']['field_{}'.format(bn)]).evaluate()
+                self.ncc_dict['g']['vector'] = True
+                self.ncc_dict['g']['interp_func'] = self.interpolations['g']
+                self.ncc_dict['g']['Nmax_{}'.format(bn)] = self.ncc_dict['neg_g']['Nmax_{}'.format(bn)]
+                self.ncc_dict['g']['from_grad'] = True 
+ 
+        #Adjust heating function so luminosity integrates to zero when appropriate.  
+        if not config.star['heat_only']:
+            integral = 0
+            for bn in self.bases.keys():
+                integral += d3.integ(self.ncc_dict['Q']['field_{}'.format(bn)])
+            C = integral.evaluate()['g']
+            vol = (4/3) * np.pi * (self.r_outer)**3
+            adj = C / vol
+            logger.info('adjusting dLdt for energy conservation; subtracting {} from H'.format(adj))
+            for bn in self.bases.keys():
+                self.ncc_dict['Q']['field_{}'.format(bn)]['g'] -= adj 
+
+
     def customize_star(self):
         pass
 
     def plot_star(self):
-        pass
+        #Make plots of the NCCs
+        if self.plot_nccs:
+            for ncc in self.ncc_dict.keys():
+                if self.ncc_dict[ncc]['interp_func'] is None:
+                    continue
+                axhline = None
+                log = False
+                ylim = None
+                rvals = []
+                dedalus_yvals = []
+                nvals = []
+                for bn, basis in self.bases.items():
+                    rvals.append(self.dedalus_r[bn].ravel())
+                    nvals.append(self.ncc_dict[ncc]['Nmax_{}'.format(bn)])
+                    if self.ncc_dict[ncc]['vector']:
+                        dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][2,0,0,:]))
+                    else:
+                        dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][0,0,:]))
+        
+                interp_func = self.mesa_interpolations[ncc]
+                if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad']:
+                    log = True
+                if ncc == 'grad_s0': 
+                    axhline = (self.s_motions / self.s_nd)
+                elif ncc in ['chi_rad', 'grad_chi_rad']:
+                    if ncc == 'chi_rad':
+                        interp_func = interp1d(self.mesa_r_nd, (self.L_nd**2/self.tau_nd).value*self.mesa_rad_diff_nd, **interp_kwargs)
+                        for ind in range(len(dedalus_yvals)):
+                            dedalus_yvals[ind] *= (self.L_nd**2/self.tau_nd).value
+                    axhline = self.rad_diff_cutoff_nd*(self.L_nd**2/self.tau_nd).value
+        
+                if ncc == 'H':
+                    interp_func = interp1d(r_vals, ( one_to_zero(r_vals, 1.5*self.nd_basis_bounds[1], width=0.05*self.nd_basis_bounds[1])*sim_H_eff ) * (1/self.H_nd), **interp_kwargs )
+                elif ncc == 'grad_s0':
+                    interp_func = interp1d(self.mesa_r_nd, (self.L_nd/self.s_nd) * self.grad_s, **interp_kwargs)
+                elif ncc in ['ln_T0', 'ln_rho0', 'grad_s0']:
+                    interp_func = self.interpolations[ncc]
+        
+                if ncc in ['grad_T', 'grad_kappa_rad']:
+                    interp_func = lambda r: -self.ncc_dict[ncc]['interp_func'](r)
+                    ylabel='-{}'.format(ncc)
+                    for i in range(len(dedalus_yvals)):
+                        dedalus_yvals[i] *= -1
+                elif ncc == 'chi_rad':
+                    ylabel = 'radiative diffusivity (cm^2/s)'
+                else:
+                    ylabel = ncc
+
+        
+                plot_ncc_figure(rvals, interp_func, dedalus_yvals, nvals, \
+                            ylabel=ylabel, fig_name=ncc, out_dir=self.out_dir, log=log, ylim=ylim, \
+                            r_int=self.stitch_radii, axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
+
 
     def save_star(self):
         # Save output fields.
@@ -603,25 +781,7 @@ class MassiveStarBuilder(DedalusMesaReader):
         logger.info('m_nd/M_\odot: {:.3f}'.format((self.m_nd/constants.M_sun).cgs))
         logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(self.Ma2_r0), self.tau_heat))
 
-       
-        #MESA radial values at simulation joints & across full star in simulation units
-        self.mesa_r_nd = (self.r/self.L_nd).cgs
-        self.nd_basis_bounds = [(rb/self.L_nd).value for rb in self.mesa_basis_bounds]
-        self.r_inner = self.nd_basis_bounds[0]
-        self.r_outer = self.nd_basis_bounds[-1]
-      
-        ### Make dedalus domain and bases
-        self.resolutions = [(1, 1, nr) for nr in config.star['nr']]
-        self.stitch_radii = self.nd_basis_bounds[1:-1]
-        self.dtype=np.float64
-        mesh=None
-        dealias = config.numerics['N_dealias']
-        self.coords, self.dist, self.bases, self.bases_keys = make_bases(self.resolutions, self.stitch_radii, self.r_outer, dealias=(1,1,dealias), dtype=self.dtype, mesh=mesh)
-        self.dedalus_r = OrderedDict()
-        for bn in self.bases.keys():
-            phi, theta, r_vals = self.bases[bn].global_grids((1, 1, dealias))
-            self.dedalus_r[bn] = r_vals
-
+        self.build_bases() 
 
     def customize_star(self):
 
@@ -700,164 +860,10 @@ class MassiveStarBuilder(DedalusMesaReader):
         else:
             raise NotImplementedError("must use smooth_h or heat_only")
 
-        # Create interpolations of the various fields that may be used in the problem
-        self.mesa_interpolations = OrderedDict()
-        self.mesa_interpolations['ln_rho0'] = interp1d(self.mesa_r_nd, np.log(self.rho/self.rho_nd), **interp_kwargs)
-        self.mesa_interpolations['rho0'] = lambda r: np.exp(self.mesa_interpolations['ln_rho0'](r))
-        self.mesa_interpolations['ln_T0'] = interp1d(self.mesa_r_nd, np.log(self.T/self.T_nd), **interp_kwargs)
-        self.mesa_interpolations['Q'] = interp1d(self.mesa_r_nd, (1/(4*np.pi*self.mesa_r_nd**2))*np.gradient(self.L_conv/self.lum_nd, self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['grad_ln_rho0'] = interp1d(self.mesa_r_nd, self.dlogrhodr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_ln_T0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_ln_pom0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['T0'] = interp1d(self.mesa_r_nd, self.T/self.T_nd, **interp_kwargs)
-        self.mesa_interpolations['pom0'] = interp1d(self.mesa_r_nd, self.R_gas_nd * self.T/self.T_nd, **interp_kwargs)
-        self.mesa_interpolations['nu_diff'] = interp1d(self.mesa_r_nd, self.simulation_visc_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['chi_rad'] = interp1d(self.mesa_r_nd, self.simulation_rad_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_chi_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_rad_diff_nd, self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['g'] = interp1d(self.mesa_r_nd, -self.g * (self.tau_nd**2/self.L_nd), **interp_kwargs)
-        self.mesa_interpolations['g_phi'] = interp1d(self.mesa_r_nd, self.g_phi * (self.tau_nd**2 / self.L_nd**2), **interp_kwargs)
-        self.mesa_interpolations['grad_s0'] = interp1d(self.mesa_r_nd, self.grad_s_over_cp*self.cp * (self.L_nd/self.s_nd), **interp_kwargs)
-        self.mesa_interpolations['s0'] = interp1d(self.mesa_r_nd, self.s_over_cp*self.cp  / self.s_nd, **interp_kwargs)
-        self.mesa_interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['grad_T0_superad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['grad_ln_T0'](self.mesa_r_nd)*self.mesa_interpolations['T0'](self.mesa_r_nd)  - \
-                                                                               self.mesa_interpolations['g'](self.mesa_r_nd)/(self.cp / self.s_nd).cgs, **interp_kwargs)
-        self.interpolations = self.mesa_interpolations.copy()
-
-        #Solve hydrostatic equilibrium BVP for consistency with evolved equations.
-        ln_rho_func = self.interpolations['ln_rho0']
-        grad_ln_rho_func = self.interpolations['grad_ln_rho0']
-        self.atmo = HSE_solve(self.coords, self.dist, self.bases,  grad_ln_rho_func, self.N2_func, Q_func=self.Q_func,
-                  r_outer=self.r_outer, r_stitch=self.stitch_radii, dtype=self.dtype, \
-                  R=self.R_gas_nd, gamma=self.gamma1_nd, comm=MPI.COMM_SELF, \
-                  nondim_radius=1, g_nondim=self.interpolations['g'](1), s_motions=self.s_motions/self.s_nd)
-
-        #Update self.interpolations of important quantities from HSE BVP
-        self.F_conv_func = self.atmo['Fconv']
-        self.interpolations['ln_rho0'] = self.atmo['ln_rho']
-        self.interpolations['rho0'] = lambda r: np.exp(self.interpolations['ln_rho0'](r))
-        self.interpolations['Q'] = self.Q_func
-        self.interpolations['grad_s0'] = self.atmo['grad_s']
-        self.interpolations['pom0'] = self.atmo['pomega']
-        self.interpolations['grad_ln_pom0'] = self.atmo['grad_ln_pomega']
-        self.interpolations['s0'] = self.atmo['s0']
-        self.interpolations['g'] = self.atmo['g']
-        self.interpolations['g_phi'] = self.atmo['g_phi']
-        self.interpolations['grad_T0_superad'] = self.atmo['grad_T0_superad']
-        self.interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
-        self.interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
-
-        #Prep NCCs for construction.
-        for ncc in self.ncc_dict.keys():
-            for i, bn in enumerate(self.bases.keys()):
-                self.ncc_dict[ncc]['Nmax_{}'.format(bn)] = self.ncc_dict[ncc]['nr_max'][i]
-                self.ncc_dict[ncc]['field_{}'.format(bn)] = None
-            if ncc in self.interpolations.keys():
-                self.ncc_dict[ncc]['interp_func'] = self.interpolations[ncc]
-            else:
-                self.ncc_dict[ncc]['interp_func'] = None
-
-        #Construct NCCs
-        for bn, basis in self.bases.items():
-            rvals = self.dedalus_r[bn]
-            for ncc in self.ncc_dict.keys():
-                interp_func = self.ncc_dict[ncc]['interp_func']
-                if interp_func is not None and not self.ncc_dict[ncc]['from_grad']:
-                    Nmax = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]
-                    vector = self.ncc_dict[ncc]['vector']
-                    grid_only = self.ncc_dict[ncc]['grid_only']
-                    self.ncc_dict[ncc]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, interp_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
-                    if self.ncc_dict[ncc]['get_grad']:
-                        name = self.ncc_dict[ncc]['grad_name']
-                        logger.info('getting {}'.format(name))
-                        grad_field = d3.grad(self.ncc_dict[ncc]['field_{}'.format(bn)]).evaluate()
-                        grad_field.change_scales((1,1,(Nmax+1)/self.resolutions[self.bases_keys == bn][2]))
-                        grad_field.change_scales(basis.dealias)
-                        self.ncc_dict[name]['field_{}'.format(bn)] = grad_field
-                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax+1
-                    if self.ncc_dict[ncc]['get_inverse']:
-                        name = 'inv_{}'.format(ncc)
-                        inv_func = lambda r: 1/interp_func(r)
-                        self.ncc_dict[name]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, inv_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
-                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax
-
-
-            if 'neg_g' in self.ncc_dict.keys():
-                if 'g' not in self.ncc_dict.keys():
-                    self.ncc_dict['g'] = OrderedDict()
-                name = 'g'
-                self.ncc_dict['g']['field_{}'.format(bn)] = (-self.ncc_dict['neg_g']['field_{}'.format(bn)]).evaluate()
-                self.ncc_dict['g']['vector'] = True
-                self.ncc_dict['g']['interp_func'] = self.interpolations['g']
-                self.ncc_dict['g']['Nmax_{}'.format(bn)] = self.ncc_dict['neg_g']['Nmax_{}'.format(bn)]
-                self.ncc_dict['g']['from_grad'] = True 
- 
-        #Adjust heating function so luminosity integrates to zero when appropriate.  
-        if not config.star['heat_only']:
-            integral = 0
-            for bn in self.bases.keys():
-                integral += d3.integ(self.ncc_dict['Q']['field_{}'.format(bn)])
-            C = integral.evaluate()['g']
-            vol = (4/3) * np.pi * (self.r_outer)**3
-            adj = C / vol
-            logger.info('adjusting dLdt for energy conservation; subtracting {} from H'.format(adj))
-            for bn in self.bases.keys():
-                self.ncc_dict['Q']['field_{}'.format(bn)]['g'] -= adj 
+        self.ncc_builder()
 
     def plot_star(self):
-       
-        #Make plots of the NCCs
-        if self.plot_nccs:
-            for ncc in self.ncc_dict.keys():
-                if self.ncc_dict[ncc]['interp_func'] is None:
-                    continue
-                axhline = None
-                log = False
-                ylim = None
-                rvals = []
-                dedalus_yvals = []
-                nvals = []
-                for bn, basis in self.bases.items():
-                    rvals.append(self.dedalus_r[bn].ravel())
-                    nvals.append(self.ncc_dict[ncc]['Nmax_{}'.format(bn)])
-                    if self.ncc_dict[ncc]['vector']:
-                        dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][2,0,0,:]))
-                    else:
-                        dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][0,0,:]))
-        
-                interp_func = self.mesa_interpolations[ncc]
-                if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad']:
-                    log = True
-                if ncc == 'grad_s0': 
-                    axhline = (self.s_motions / self.s_nd)
-                elif ncc in ['chi_rad', 'grad_chi_rad']:
-                    if ncc == 'chi_rad':
-                        interp_func = interp1d(self.mesa_r_nd, (self.L_nd**2/self.tau_nd).value*self.mesa_rad_diff_nd, **interp_kwargs)
-                        for ind in range(len(dedalus_yvals)):
-                            dedalus_yvals[ind] *= (self.L_nd**2/self.tau_nd).value
-                    axhline = self.rad_diff_cutoff_nd*(self.L_nd**2/self.tau_nd).value
-        
-                if ncc == 'H':
-                    interp_func = interp1d(r_vals, ( one_to_zero(r_vals, 1.5*self.nd_basis_bounds[1], width=0.05*self.nd_basis_bounds[1])*sim_H_eff ) * (1/self.H_nd), **interp_kwargs )
-                elif ncc == 'grad_s0':
-                    interp_func = interp1d(self.mesa_r_nd, (self.L_nd/self.s_nd) * self.grad_s, **interp_kwargs)
-                elif ncc in ['ln_T0', 'ln_rho0', 'grad_s0']:
-                    interp_func = self.interpolations[ncc]
-        
-                if ncc in ['grad_T', 'grad_kappa_rad']:
-                    interp_func = lambda r: -self.ncc_dict[ncc]['interp_func'](r)
-                    ylabel='-{}'.format(ncc)
-                    for i in range(len(dedalus_yvals)):
-                        dedalus_yvals[i] *= -1
-                elif ncc == 'chi_rad':
-                    ylabel = 'radiative diffusivity (cm^2/s)'
-                else:
-                    ylabel = ncc
-
-        
-                plot_ncc_figure(rvals, interp_func, dedalus_yvals, nvals, \
-                            ylabel=ylabel, fig_name=ncc, out_dir=self.out_dir, log=log, ylim=ylim, \
-                            r_int=self.stitch_radii, axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
+        super().plot_star()
 
         plt.figure()
         N2s = []
@@ -1005,24 +1011,7 @@ class MdwarfBuilder(DedalusMesaReader):
         logger.info('m_nd/M_\odot: {:.3f}'.format((self.m_nd/constants.M_sun).cgs))
         logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(self.Ma2_r0), self.tau_heat))
 
-       
-        #MESA radial values at simulation joints & across full star in simulation units
-        self.mesa_r_nd = (self.r/self.L_nd).cgs
-        self.nd_basis_bounds = [(rb/self.L_nd).value for rb in self.mesa_basis_bounds]
-        self.r_inner = self.nd_basis_bounds[0]
-        self.r_outer = self.nd_basis_bounds[-1]
-      
-        ### Make dedalus domain and bases
-        self.resolutions = [(1, 1, nr) for nr in config.star['nr']]
-        self.stitch_radii = self.nd_basis_bounds[1:-1]
-        self.dtype=np.float64
-        mesh=None
-        dealias = config.numerics['N_dealias']
-        self.coords, self.dist, self.bases, self.bases_keys = make_bases(self.resolutions, self.stitch_radii, self.r_outer, dealias=(1,1,dealias), dtype=self.dtype, mesh=mesh)
-        self.dedalus_r = OrderedDict()
-        for bn in self.bases.keys():
-            phi, theta, r_vals = self.bases[bn].global_grids((1, 1, dealias))
-            self.dedalus_r[bn] = r_vals
+        self.build_bases() 
 
     def customize_star(self):
         #Adjust gravitational potential so that it doesn't cross zero somewhere wonky
@@ -1110,164 +1099,11 @@ class MdwarfBuilder(DedalusMesaReader):
         else:
             raise NotImplementedError("must use smooth_h or heat_only")
 
-        # Create interpolations of the various fields that may be used in the problem
-        self.mesa_interpolations = OrderedDict()
-        self.mesa_interpolations['ln_rho0'] = interp1d(self.mesa_r_nd, np.log(self.rho/self.rho_nd), **interp_kwargs)
-        self.mesa_interpolations['rho0'] = lambda r: np.exp(self.mesa_interpolations['ln_rho0'](r))
-        self.mesa_interpolations['ln_T0'] = interp1d(self.mesa_r_nd, np.log(self.T/self.T_nd), **interp_kwargs)
-        self.mesa_interpolations['Q'] = interp1d(self.mesa_r_nd, (1/(4*np.pi*self.mesa_r_nd**2))*np.gradient(self.L_conv/self.lum_nd, self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['grad_ln_rho0'] = interp1d(self.mesa_r_nd, self.dlogrhodr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_ln_T0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_ln_pom0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['T0'] = interp1d(self.mesa_r_nd, self.T/self.T_nd, **interp_kwargs)
-        self.mesa_interpolations['pom0'] = interp1d(self.mesa_r_nd, self.R_gas_nd * self.T/self.T_nd, **interp_kwargs)
-        self.mesa_interpolations['nu_diff'] = interp1d(self.mesa_r_nd, self.simulation_visc_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['chi_rad'] = interp1d(self.mesa_r_nd, self.simulation_rad_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_chi_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_rad_diff_nd, self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['g'] = interp1d(self.mesa_r_nd, -self.g * (self.tau_nd**2/self.L_nd), **interp_kwargs)
-        self.mesa_interpolations['g_phi'] = interp1d(self.mesa_r_nd, self.g_phi * (self.tau_nd**2 / self.L_nd**2), **interp_kwargs)
-        self.mesa_interpolations['grad_s0'] = interp1d(self.mesa_r_nd, self.grad_s_over_cp*self.cp * (self.L_nd/self.s_nd), **interp_kwargs)
-        self.mesa_interpolations['s0'] = interp1d(self.mesa_r_nd, self.s_over_cp*self.cp  / self.s_nd, **interp_kwargs)
-        self.mesa_interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['grad_T0_superad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['grad_ln_T0'](self.mesa_r_nd)*self.mesa_interpolations['T0'](self.mesa_r_nd)  - \
-                                                                               self.mesa_interpolations['g'](self.mesa_r_nd)/(self.cp / self.s_nd).cgs, **interp_kwargs)
-        self.interpolations = self.mesa_interpolations.copy()
-
-        #Solve hydrostatic equilibrium BVP for consistency with evolved equations.
-        ln_rho_func = self.interpolations['ln_rho0']
-        grad_ln_rho_func = self.interpolations['grad_ln_rho0']
-        self.atmo = HSE_solve(self.coords, self.dist, self.bases,  grad_ln_rho_func, self.N2_func, Q_func=self.Q_func,
-                  r_outer=self.r_outer, r_stitch=self.stitch_radii, dtype=self.dtype, \
-                  R=self.R_gas_nd, gamma=self.gamma1_nd, comm=MPI.COMM_SELF, \
-                  nondim_radius=1, g_nondim=self.interpolations['g'](1), s_motions=self.s_motions/self.s_nd)
-
-        #Update self.interpolations of important quantities from HSE BVP
-        self.F_conv_func = self.atmo['Fconv']
-        self.interpolations['ln_rho0'] = self.atmo['ln_rho']
-        self.interpolations['rho0'] = lambda r: np.exp(self.interpolations['ln_rho0'](r))
-        self.interpolations['Q'] = self.Q_func
-        self.interpolations['grad_s0'] = self.atmo['grad_s']
-        self.interpolations['pom0'] = self.atmo['pomega']
-        self.interpolations['grad_ln_pom0'] = self.atmo['grad_ln_pomega']
-        self.interpolations['s0'] = self.atmo['s0']
-        self.interpolations['g'] = self.atmo['g']
-        self.interpolations['g_phi'] = self.atmo['g_phi']
-        self.interpolations['grad_T0_superad'] = self.atmo['grad_T0_superad']
-        self.interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
-        self.interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
-
-        #Prep NCCs for construction.
-        for ncc in self.ncc_dict.keys():
-            for i, bn in enumerate(self.bases.keys()):
-                self.ncc_dict[ncc]['Nmax_{}'.format(bn)] = self.ncc_dict[ncc]['nr_max'][i]
-                self.ncc_dict[ncc]['field_{}'.format(bn)] = None
-            if ncc in self.interpolations.keys():
-                self.ncc_dict[ncc]['interp_func'] = self.interpolations[ncc]
-            else:
-                self.ncc_dict[ncc]['interp_func'] = None
-
-        #Construct NCCs
-        for bn, basis in self.bases.items():
-            rvals = self.dedalus_r[bn]
-            for ncc in self.ncc_dict.keys():
-                interp_func = self.ncc_dict[ncc]['interp_func']
-                if interp_func is not None and not self.ncc_dict[ncc]['from_grad']:
-                    Nmax = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]
-                    vector = self.ncc_dict[ncc]['vector']
-                    grid_only = self.ncc_dict[ncc]['grid_only']
-                    self.ncc_dict[ncc]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, interp_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
-                    if self.ncc_dict[ncc]['get_grad']:
-                        name = self.ncc_dict[ncc]['grad_name']
-                        logger.info('getting {}'.format(name))
-                        grad_field = d3.grad(self.ncc_dict[ncc]['field_{}'.format(bn)]).evaluate()
-                        grad_field.change_scales((1,1,(Nmax+1)/self.resolutions[self.bases_keys == bn][2]))
-                        grad_field.change_scales(basis.dealias)
-                        self.ncc_dict[name]['field_{}'.format(bn)] = grad_field
-                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax+1
-                    if self.ncc_dict[ncc]['get_inverse']:
-                        name = 'inv_{}'.format(ncc)
-                        inv_func = lambda r: 1/interp_func(r)
-                        self.ncc_dict[name]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, inv_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
-                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax
-
-
-            if 'neg_g' in self.ncc_dict.keys():
-                if 'g' not in self.ncc_dict.keys():
-                    self.ncc_dict['g'] = OrderedDict()
-                name = 'g'
-                self.ncc_dict['g']['field_{}'.format(bn)] = (-self.ncc_dict['neg_g']['field_{}'.format(bn)]).evaluate()
-                self.ncc_dict['g']['vector'] = True
-                self.ncc_dict['g']['interp_func'] = self.interpolations['g']
-                self.ncc_dict['g']['Nmax_{}'.format(bn)] = self.ncc_dict['neg_g']['Nmax_{}'.format(bn)]
-                self.ncc_dict['g']['from_grad'] = True 
- 
-        #Adjust heating function so luminosity integrates to zero when appropriate.  
-        if not config.star['heat_only']:
-            integral = 0
-            for bn in self.bases.keys():
-                integral += d3.integ(self.ncc_dict['Q']['field_{}'.format(bn)])
-            C = integral.evaluate()['g']
-            vol = (4/3) * np.pi * (self.r_outer)**3
-            adj = C / vol
-            logger.info('adjusting dLdt for energy conservation; subtracting {} from H'.format(adj))
-            for bn in self.bases.keys():
-                self.ncc_dict['Q']['field_{}'.format(bn)]['g'] -= adj 
+        self.ncc_builder()
 
 
     def plot_star(self):
-        #Make plots of the NCCs
-        if self.plot_nccs:
-            for ncc in self.ncc_dict.keys():
-                if self.ncc_dict[ncc]['interp_func'] is None:
-                    continue
-                axhline = None
-                log = False
-                ylim = None
-                rvals = []
-                dedalus_yvals = []
-                nvals = []
-                for bn, basis in self.bases.items():
-                    rvals.append(self.dedalus_r[bn].ravel())
-                    nvals.append(self.ncc_dict[ncc]['Nmax_{}'.format(bn)])
-                    if self.ncc_dict[ncc]['vector']:
-                        dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][2,0,0,:]))
-                    else:
-                        dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][0,0,:]))
-        
-                interp_func = self.mesa_interpolations[ncc]
-                if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad']:
-                    log = True
-                if ncc == 'grad_s0': 
-                    axhline = (self.s_motions / self.s_nd)
-                elif ncc in ['chi_rad', 'grad_chi_rad']:
-                    if ncc == 'chi_rad':
-                        interp_func = interp1d(self.mesa_r_nd, (self.L_nd**2/self.tau_nd).value*self.mesa_rad_diff_nd, **interp_kwargs)
-                        for ind in range(len(dedalus_yvals)):
-                            dedalus_yvals[ind] *= (self.L_nd**2/self.tau_nd).value
-                    axhline = self.rad_diff_cutoff_nd*(self.L_nd**2/self.tau_nd).value
-        
-                if ncc == 'H':
-                    interp_func = interp1d(r_vals, ( one_to_zero(r_vals, 1.5*self.nd_basis_bounds[1], width=0.05*self.nd_basis_bounds[1])*sim_H_eff ) * (1/self.H_nd), **interp_kwargs )
-                elif ncc == 'grad_s0':
-                    interp_func = interp1d(self.mesa_r_nd, (self.L_nd/self.s_nd) * self.grad_s, **interp_kwargs)
-                elif ncc in ['ln_T0', 'ln_rho0', 'grad_s0']:
-                    interp_func = self.interpolations[ncc]
-        
-                if ncc in ['grad_T', 'grad_kappa_rad']:
-                    interp_func = lambda r: -self.ncc_dict[ncc]['interp_func'](r)
-                    ylabel='-{}'.format(ncc)
-                    for i in range(len(dedalus_yvals)):
-                        dedalus_yvals[i] *= -1
-                elif ncc == 'chi_rad':
-                    ylabel = 'radiative diffusivity (cm^2/s)'
-                else:
-                    ylabel = ncc
-
-        
-                plot_ncc_figure(rvals, interp_func, dedalus_yvals, nvals, \
-                            ylabel=ylabel, fig_name=ncc, out_dir=self.out_dir, log=log, ylim=ylim, \
-                            r_int=self.stitch_radii, axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
+        super().plot_star()
 
     def save_star(self):
         super().save_star()
@@ -1336,24 +1172,7 @@ class EnvelopeStarBuilder(DedalusMesaReader):
         logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(self.Ma2_r0), self.tau_heat))
 
 
-      
-        #MESA radial values at simulation joints & across full star in simulation units
-        self.mesa_r_nd = (self.r/self.L_nd).cgs
-        self.nd_basis_bounds = [(rb/self.L_nd).value for rb in self.mesa_basis_bounds]
-        self.r_inner = self.nd_basis_bounds[0]
-        self.r_outer = self.nd_basis_bounds[-1]
-      
-        ### Make dedalus domain and bases
-        self.resolutions = [(1, 1, nr) for nr in config.star['nr']]
-        self.stitch_radii = self.nd_basis_bounds[1:-1]
-        self.dtype=np.float64
-        mesh=None
-        dealias = config.numerics['N_dealias']
-        self.coords, self.dist, self.bases, self.bases_keys = make_bases(self.resolutions, self.stitch_radii, self.r_outer, r_inner=self.r_inner, dealias=(1,1,dealias), dtype=self.dtype, mesh=mesh)
-        self.dedalus_r = OrderedDict()
-        for bn in self.bases.keys():
-            phi, theta, r_vals = self.bases[bn].global_grids((1, 1, dealias))
-            self.dedalus_r[bn] = r_vals
+        self.build_bases() 
 
     def customize_star(self):
         #Adjust gravitational potential so that it doesn't cross zero somewhere wonky
@@ -1455,164 +1274,10 @@ class EnvelopeStarBuilder(DedalusMesaReader):
         else:
             raise NotImplementedError("must use smooth_h or heat_only")
 
-        # Create interpolations of the various fields that may be used in the problem
-        self.mesa_interpolations = OrderedDict()
-        self.mesa_interpolations['ln_rho0'] = interp1d(self.mesa_r_nd, np.log(self.rho/self.rho_nd), **interp_kwargs)
-        self.mesa_interpolations['rho0'] = lambda r: np.exp(self.mesa_interpolations['ln_rho0'](r))
-        self.mesa_interpolations['ln_T0'] = interp1d(self.mesa_r_nd, np.log(self.T/self.T_nd), **interp_kwargs)
-        self.mesa_interpolations['Q'] = interp1d(self.mesa_r_nd, (1/(4*np.pi*self.mesa_r_nd**2))*np.gradient(self.L_conv/self.lum_nd, self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['grad_ln_rho0'] = interp1d(self.mesa_r_nd, self.dlogrhodr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_ln_T0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_ln_pom0'] = interp1d(self.mesa_r_nd, self.dlogTdr*self.L_nd, **interp_kwargs)
-        self.mesa_interpolations['T0'] = interp1d(self.mesa_r_nd, self.T/self.T_nd, **interp_kwargs)
-        self.mesa_interpolations['pom0'] = interp1d(self.mesa_r_nd, self.R_gas_nd * self.T/self.T_nd, **interp_kwargs)
-        self.mesa_interpolations['nu_diff'] = interp1d(self.mesa_r_nd, self.simulation_visc_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['chi_rad'] = interp1d(self.mesa_r_nd, self.simulation_rad_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_chi_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_rad_diff_nd, self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['g'] = interp1d(self.mesa_r_nd, -self.g * (self.tau_nd**2/self.L_nd), **interp_kwargs)
-        self.mesa_interpolations['g_phi'] = interp1d(self.mesa_r_nd, self.g_phi * (self.tau_nd**2 / self.L_nd**2), **interp_kwargs)
-        self.mesa_interpolations['grad_s0'] = interp1d(self.mesa_r_nd, self.grad_s_over_cp*self.cp * (self.L_nd/self.s_nd), **interp_kwargs)
-        self.mesa_interpolations['s0'] = interp1d(self.mesa_r_nd, self.s_over_cp*self.cp  / self.s_nd, **interp_kwargs)
-        self.mesa_interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
-        self.mesa_interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.mesa_interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
-        self.mesa_interpolations['grad_T0_superad'] = interp1d(self.mesa_r_nd, self.mesa_interpolations['grad_ln_T0'](self.mesa_r_nd)*self.mesa_interpolations['T0'](self.mesa_r_nd)  - \
-                                                                               self.mesa_interpolations['g'](self.mesa_r_nd)/(self.cp / self.s_nd).cgs, **interp_kwargs)
-        self.interpolations = self.mesa_interpolations.copy()
-
-        #Solve hydrostatic equilibrium BVP for consistency with evolved equations.
-        ln_rho_func = self.interpolations['ln_rho0']
-        grad_ln_rho_func = self.interpolations['grad_ln_rho0']
-        self.atmo = HSE_solve(self.coords, self.dist, self.bases,  grad_ln_rho_func, self.N2_func, Q_func=self.Q_func,
-                  r_outer=self.r_outer, r_stitch=self.stitch_radii, dtype=self.dtype, \
-                  R=self.R_gas_nd, gamma=self.gamma1_nd, comm=MPI.COMM_SELF, \
-                  nondim_radius=self.r_outer, g_nondim=self.interpolations['g'](1), s_motions=self.s_motions/self.s_nd)
-
-        #Update self.interpolations of important quantities from HSE BVP
-        self.F_conv_func = self.atmo['Fconv']
-        self.interpolations['ln_rho0'] = self.atmo['ln_rho']
-        self.interpolations['rho0'] = lambda r: np.exp(self.interpolations['ln_rho0'](r))
-        self.interpolations['Q'] = self.Q_func
-        self.interpolations['grad_s0'] = self.atmo['grad_s']
-        self.interpolations['pom0'] = self.atmo['pomega']
-        self.interpolations['grad_ln_pom0'] = self.atmo['grad_ln_pomega']
-        self.interpolations['s0'] = self.atmo['s0']
-        self.interpolations['g'] = self.atmo['g']
-        self.interpolations['g_phi'] = self.atmo['g_phi']
-        self.interpolations['grad_T0_superad'] = self.atmo['grad_T0_superad']
-        self.interpolations['kappa_rad'] = interp1d(self.mesa_r_nd, self.interpolations['rho0'](self.mesa_r_nd)*self.cp_nd*self.simulation_rad_diff_nd, **interp_kwargs)
-        self.interpolations['grad_kappa_rad'] = interp1d(self.mesa_r_nd, np.gradient(self.interpolations['kappa_rad'](self.mesa_r_nd), self.mesa_r_nd), **interp_kwargs)
-
-        #Prep NCCs for construction.
-        for ncc in self.ncc_dict.keys():
-            for i, bn in enumerate(self.bases.keys()):
-                self.ncc_dict[ncc]['Nmax_{}'.format(bn)] = self.ncc_dict[ncc]['nr_max'][i]
-                self.ncc_dict[ncc]['field_{}'.format(bn)] = None
-            if ncc in self.interpolations.keys():
-                self.ncc_dict[ncc]['interp_func'] = self.interpolations[ncc]
-            else:
-                self.ncc_dict[ncc]['interp_func'] = None
-
-        #Construct NCCs
-        for bn, basis in self.bases.items():
-            rvals = self.dedalus_r[bn]
-            for ncc in self.ncc_dict.keys():
-                interp_func = self.ncc_dict[ncc]['interp_func']
-                if interp_func is not None and not self.ncc_dict[ncc]['from_grad']:
-                    Nmax = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]
-                    vector = self.ncc_dict[ncc]['vector']
-                    grid_only = self.ncc_dict[ncc]['grid_only']
-                    self.ncc_dict[ncc]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, interp_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
-                    if self.ncc_dict[ncc]['get_grad']:
-                        name = self.ncc_dict[ncc]['grad_name']
-                        logger.info('getting {}'.format(name))
-                        grad_field = d3.grad(self.ncc_dict[ncc]['field_{}'.format(bn)]).evaluate()
-                        grad_field.change_scales((1,1,(Nmax+1)/self.resolutions[self.bases_keys == bn][2]))
-                        grad_field.change_scales(basis.dealias)
-                        self.ncc_dict[name]['field_{}'.format(bn)] = grad_field
-                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax+1
-                    if self.ncc_dict[ncc]['get_inverse']:
-                        name = 'inv_{}'.format(ncc)
-                        inv_func = lambda r: 1/interp_func(r)
-                        self.ncc_dict[name]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, inv_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
-                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax
-
-
-            if 'neg_g' in self.ncc_dict.keys():
-                if 'g' not in self.ncc_dict.keys():
-                    self.ncc_dict['g'] = OrderedDict()
-                name = 'g'
-                self.ncc_dict['g']['field_{}'.format(bn)] = (-self.ncc_dict['neg_g']['field_{}'.format(bn)]).evaluate()
-                self.ncc_dict['g']['vector'] = True
-                self.ncc_dict['g']['interp_func'] = self.interpolations['g']
-                self.ncc_dict['g']['Nmax_{}'.format(bn)] = self.ncc_dict['neg_g']['Nmax_{}'.format(bn)]
-                self.ncc_dict['g']['from_grad'] = True 
- 
-        #Adjust heating function so luminosity integrates to zero when appropriate.  
-        if not config.star['heat_only']:
-            integral = 0
-            for bn in self.bases.keys():
-                integral += d3.integ(self.ncc_dict['Q']['field_{}'.format(bn)])
-            C = integral.evaluate()['g']
-            vol = (4/3) * np.pi * (self.r_outer)**3
-            adj = C / vol
-            logger.info('adjusting dLdt for energy conservation; subtracting {} from H'.format(adj))
-            for bn in self.bases.keys():
-                self.ncc_dict['Q']['field_{}'.format(bn)]['g'] -= adj 
-
+        self.ncc_builder()
 
     def plot_star(self):
-        #Make plots of the NCCs
-        if self.plot_nccs:
-            for ncc in self.ncc_dict.keys():
-                if self.ncc_dict[ncc]['interp_func'] is None:
-                    continue
-                axhline = None
-                log = False
-                ylim = None
-                rvals = []
-                dedalus_yvals = []
-                nvals = []
-                for bn, basis in self.bases.items():
-                    rvals.append(self.dedalus_r[bn].ravel())
-                    nvals.append(self.ncc_dict[ncc]['Nmax_{}'.format(bn)])
-                    if self.ncc_dict[ncc]['vector']:
-                        dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][2,0,0,:]))
-                    else:
-                        dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][0,0,:]))
-        
-                interp_func = self.mesa_interpolations[ncc]
-                if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad']:
-                    log = True
-                if ncc == 'grad_s0': 
-                    axhline = (self.s_motions / self.s_nd)
-                elif ncc in ['chi_rad', 'grad_chi_rad']:
-                    if ncc == 'chi_rad':
-                        interp_func = interp1d(self.mesa_r_nd, (self.L_nd**2/self.tau_nd).value*self.mesa_rad_diff_nd, **interp_kwargs)
-                        for ind in range(len(dedalus_yvals)):
-                            dedalus_yvals[ind] *= (self.L_nd**2/self.tau_nd).value
-                    axhline = self.rad_diff_cutoff_nd*(self.L_nd**2/self.tau_nd).value
-        
-                if ncc == 'H':
-                    interp_func = interp1d(r_vals, ( one_to_zero(r_vals, 1.5*self.nd_basis_bounds[1], width=0.05*self.nd_basis_bounds[1])*sim_H_eff ) * (1/self.H_nd), **interp_kwargs )
-                elif ncc == 'grad_s0':
-                    interp_func = interp1d(self.mesa_r_nd, (self.L_nd/self.s_nd) * self.grad_s, **interp_kwargs)
-                elif ncc in ['ln_T0', 'ln_rho0', 'grad_s0']:
-                    interp_func = self.interpolations[ncc]
-        
-                if ncc in ['grad_T', 'grad_kappa_rad']:
-                    interp_func = lambda r: -self.ncc_dict[ncc]['interp_func'](r)
-                    ylabel='-{}'.format(ncc)
-                    for i in range(len(dedalus_yvals)):
-                        dedalus_yvals[i] *= -1
-                elif ncc == 'chi_rad':
-                    ylabel = 'radiative diffusivity (cm^2/s)'
-                else:
-                    ylabel = ncc
-
-        
-                plot_ncc_figure(rvals, interp_func, dedalus_yvals, nvals, \
-                            ylabel=ylabel, fig_name=ncc, out_dir=self.out_dir, log=log, ylim=ylim, \
-                            r_int=self.stitch_radii, axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
+        super().plot_star()
 
     def save_star(self):
         super().save_star()
