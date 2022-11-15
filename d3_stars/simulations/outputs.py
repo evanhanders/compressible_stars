@@ -28,6 +28,9 @@ defaults = ['u', 'momentum', 'ur', 'u_squared', 'KE', 'PE', 'IE', 'TotE', 'PE1',
 for k in defaults + ['F_{}'.format(t) for t in flux_tags]:
     output_tasks[k] = '{}'.format(k) + '_{0}'
 
+for k in ['F_{}'.format(t) for t in flux_tags]:
+    output_tasks[k+'_r'] = 'dot(Grid(er), ' + output_tasks[k] + ')' 
+
 #angular momentum components
 output_tasks['Lx'] = 'dot(ex_{0},L_{0})'
 output_tasks['Ly'] = 'dot(ey_{0},L_{0})'
