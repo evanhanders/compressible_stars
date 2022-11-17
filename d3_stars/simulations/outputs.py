@@ -129,11 +129,9 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
     
     solver.problem.namespace['az_avg'] = az_avg
     solver.problem.namespace['s2_avg'] = s2_avg
-    solver.problem.namespace['s2_std'] = s2_std
     solver.problem.namespace['integ'] = integ
     namespace['az_avg'] = solver.problem.namespace['az_avg']
     namespace['s2_avg'] = solver.problem.namespace['s2_avg']
-    namespace['s2_std'] = solver.problem.namespace['s2_std']
     namespace['integ'] = solver.problem.namespace['integ']
 
     star_dir, out_file = name_star()
@@ -155,6 +153,8 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
 
         solver.problem.namespace['vol_avg_{}'.format(bn)] = functools.partial(vol_avg, volume=vol)
         namespace['vol_avg_{}'.format(bn)] = solver.problem.namespace['vol_avg_{}'.format(bn)]
+        namespace['s2_std_{}'.format(bn)] = lambda A: np.sqrt(s2_avg((A - namespace['ones_{}'.format(bn)]*s2_avg(A))**2))
+        solver.problem.namespace['s2_std_{}'.format(bn)] = namespace['s2_std_{}'.format(bn)]
     
 
     for h_name in config.handlers.keys():
@@ -241,9 +241,9 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
                 elif this_task['type'] == 's2_std':
                     for fieldname in this_task['fields']:
                         fieldstr = output_tasks[fieldname].format(bn)
-                        task_str = 's2_std({})'.format(fieldstr)
+                        task_str = 's2_std_{}({})'.format(bn, fieldstr)
                         task = d3.Grid(eval(task_str, dict(solver.problem.namespace)))
-                        handler.add_task(task, name='s2_std({}_{})'.format(fieldname, bn))
+                        handler.add_task(task, name='s2_std_{}({}_{})'.format(bn, fieldname, bn))
                 else:
                     raise NotImplementedError("Output task type not implemented: {}".format(this_task['type']))
 
