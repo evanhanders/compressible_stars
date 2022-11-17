@@ -740,7 +740,7 @@ class MassiveStarBuilder(DedalusMesaReader):
 
     def __init__(self, plot_nccs=False):
         """ Create nondimensionalization and Dedalus domain / bases. """
-        super().__init__()
+        super().__init__(plot_nccs=plot_nccs)
 
     def specify_domain_and_nondimensionalization(self):
         # Find edge of core cz
@@ -985,7 +985,7 @@ class MdwarfBuilder(DedalusMesaReader):
 
     def __init__(self, plot_nccs=False):
         """ Create nondimensionalization and Dedalus domain / bases. """
-        super().__init__()
+        super().__init__(plot_nccs=plot_nccs)
 
     def specify_domain_and_nondimensionalization(self):
 
@@ -1109,7 +1109,7 @@ class EnvelopeStarBuilder(DedalusMesaReader):
 
     def __init__(self, plot_nccs=False):
         """ Create nondimensionalization and Dedalus domain / bases. """
-        super().__init__()
+        super().__init__(plot_nccs=plot_nccs)
 
     def specify_domain_and_nondimensionalization(self):
         # Find edges of dedalus domain
