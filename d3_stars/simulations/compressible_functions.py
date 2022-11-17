@@ -61,7 +61,7 @@ class SphericalCompressibleProblem():
         self.vec_taus = ['tau_u']
         self.scalar_taus =  ['tau_s']
         self.vec_nccs = ['grad_pom0', 'grad_ln_pom0', 'grad_ln_rho0', 'grad_s0', 'g', 'rvec', 'grad_nu_diff', 'grad_chi_rad', 'grad_kappa_rad', 'grad_T0_superad']
-        self.scalar_nccs = ['pom0', 'rho0', 'ln_rho0', 'g_phi', 'nu_diff', 'kappa_rad', 'chi_rad', 's0', 'inv_pom0']
+        self.scalar_nccs = ['pom0', 'rho0', 'ln_rho0', 'g_phi', 'nu_diff', 'kappa_rad', 'chi_rad', 's0', 'inv_pom0', 'L_heat']
         self.sphere_unit_vectors = ['ephi', 'etheta', 'er']
         self.cartesian_unit_vectors = ['ex', 'ey', 'ez']
 
@@ -345,6 +345,7 @@ class SphericalCompressibleProblem():
 
             self.namespace['grad_pom_full_{}'.format(bn)] = grad_pom_full = (grid_grad_pom0 + grad_pom_fluc)
             self.namespace['pom_full_{}'.format(bn)] = pom_full = (grid_pom0 + pom_fluc)
+            self.namespace['T_full_{}'.format(bn)] = T_full = pom_full / grid_R
             self.namespace['inv_pom_full_{}'.format(bn)] = inv_pom_full = d3.Grid(1/pom_full)
             self.namespace['grad_pom2_over_pom0_{}'.format(bn)] = grad_pom2_over_pom0 = grad_pom1_over_pom0_RHS*pom_fluc_over_pom0
 
@@ -418,6 +419,8 @@ class SphericalCompressibleProblem():
             self.namespace['FlucE_linear_RHS_{}'.format(bn)] = grid_rho0*(grid_cv_div_R*pom1_RHS + d3.Grid(grid_g_phi + grid_cv_div_R*grid_pom0)*ln_rho1)
             self.namespace['Re_{}'.format(bn)] = np.sqrt(u_squared) * d3.Grid(1/nu_diff)
             self.namespace['Ma_{}'.format(bn)] = np.sqrt(u_squared) / np.sqrt(pom_full) 
+            self.namespace['vorticity_{}'.format(bn)] = vorticity = d3.curl(u)
+            self.namespace['enstrophy_{}'.format(bn)] = vorticity@vorticity
             self.namespace['L_{}'.format(bn)] = d3.cross(rvec, momentum)
 
             grad_T0_superad = d3.Grid(self.namespace['grad_T0_superad_{}'.format(bn)]*ones).evaluate()
@@ -430,6 +433,7 @@ class SphericalCompressibleProblem():
             self.namespace['F_PE_{}'.format(bn)] = F_PE = u * PE
             self.namespace['F_enth_{}'.format(bn)] = F_enth = grid_cp_div_R * momentum * pom_full
             self.namespace['F_visc_{}'.format(bn)] = F_visc = d3.Grid(-nu_diff)*momentum@sigma_RHS
+            self.namespace['F_conv_{}'.format(bn)] = F_conv = rho_full*T_full*s_full*u
 
             #Waves
             self.namespace['N2_{}'.format(bn)] = N2 = grad_s_full@d3.Grid(-g/Cp)
@@ -443,9 +447,22 @@ class SphericalCompressibleProblem():
 
             self.namespace['PdV_source_KE_{}'.format(bn)] = PdV_source_KE = momentum @ (-d3.grad(P_full)/rho_full) 
             self.namespace['PdV_source_IE_{}'.format(bn)] = PdV_source_IE =  - P_full*div_u
+            self.namespace['PdV_source_anelastic_{}'.format(bn)] = PdV_source_anelastic = rho_full*(s1/Cp)*u@g
             self.namespace['tot_PdV_source_{}'.format(bn)] = tot_PdV_source = PdV_source_KE + PdV_source_IE
 
             self.namespace['divRad_source_{}'.format(bn)] = divRad_source = (P_full/grid_R)*(full_div_rad_flux_pt1 + full_div_rad_flux_pt2 + div_rad_flux_L)
+
+
+            #Entropy dissipation terms
+            flux_to_lum = 4*np.pi*r_vals**2
+            L_heat = self.namespace['L_heat_{}'.format(bn)]*ones
+            integ_by_parts_T = (1/T_full)**2 * (grad_pom_full/grid_R)
+            self.namespace['F_entropy_{}'.format(bn)] = F_entropy = rho_full*s_full*u
+            self.namespace['therm_visc_lum_{}'.format(bn)] = visc_source_IE  * (grid_R/pom_full) * flux_to_lum
+            self.namespace['integ_by_parts_1_{}'.format(bn)] = (L_heat*er - flux_to_lum*F_cond) / T_full
+            self.namespace['integ_by_parts_2_{}'.format(bn)] = L_heat*er@integ_by_parts_T 
+            self.namespace['integ_by_parts_3_{}'.format(bn)] = -flux_to_lum*F_cond@integ_by_parts_T 
+
 
 
             self.namespace['source_KE_{}'.format(bn)] = visc_source_KE + PdV_source_KE #g term turns into dt(PE) + div(u*PE); do not include here while trying to solve for dt(KE) + div(u*KE).
@@ -459,6 +476,7 @@ class SphericalCompressibleProblem():
         return self.namespace
 
     def fill_structure(self, scales=None):
+        from scipy.interpolate import interp1d
         self.fields_filled = True
         logger.info('using NCC file {}'.format(self.ncc_file))
         max_dt = None
@@ -497,6 +515,11 @@ class SphericalCompressibleProblem():
                             self.namespace['{}_{}'.format(k, bn)]['g'] = f['{}_{}'.format(k, bn)][:,:1,:1,grid_slices[-1]]
                     for k in self.scalar_nccs:
                         self.dist.comm_cart.Barrier()
+                        if k == 'L_heat':
+                            sim_lum_r = f['lum_r_vals'][()]
+                            sim_lum   = f['sim_lum'][()]
+                            lum_func = interp1d(sim_lum_r, sim_lum, bounds_error=False, fill_value='extrapolate')
+                            self.namespace['{}_{}'.format(k, bn)]['g'] = lum_func(r)
                         if '{}_{}'.format(k, bn) not in f.keys():
                             logger.info('skipping {}_{}, not in file'.format(k, bn))
                             continue

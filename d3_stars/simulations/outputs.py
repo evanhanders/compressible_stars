@@ -16,19 +16,20 @@ import logging
 logger = logging.getLogger(__name__)
 
 output_tasks = {}
-flux_tags = ['cond', 'cond_superad', 'KE', 'PE', 'enth', 'visc']
+flux_tags = ['cond', 'cond_superad', 'KE', 'PE', 'enth', 'visc', 'conv', 'entropy']
 defaults = ['u', 'momentum', 'ur', 'u_squared', 'KE', 'PE', 'IE', 'TotE', 'PE1', 'IE1', 'FlucE', 'Re', 'Ma', 'ln_rho1', \
+            'enstrophy','therm_visc_lum', 'L_heat', 'integ_by_parts_1', 'integ_by_parts_2', 'integ_by_parts_3',\
             'pom1', 'pom2', 'pom_fluc', 'pom_full', 'grad_s1', 'L', 's1', 'rho_full', 'rho_fluc', 'enthalpy_fluc', 'N2', \
             'Q_source', 'visc_source_KE', 'visc_source_IE', 'tot_visc_source', 'T_superad_z','T_superad1_z',\
             'therm_diss_1', 'therm_diss_2', 'therm_diss_3',\
-            'divRad_source', 'PdV_source_KE', 'PdV_source_IE', 'tot_PdV_source',\
+            'divRad_source', 'PdV_source_KE', 'PdV_source_IE', 'tot_PdV_source', 'PdV_source_anelastic', \
             'source_KE', 'source_IE', 'tot_source',\
             'EOS_goodness', 'EOS_goodness_bg']
 
 for k in defaults + ['F_{}'.format(t) for t in flux_tags]:
     output_tasks[k] = '{}'.format(k) + '_{0}'
 
-for k in ['F_{}'.format(t) for t in flux_tags]:
+for k in ['F_{}'.format(t) for t in flux_tags] + ['grad_s1',]:
     output_tasks[k+'_r'] = 'dot(Grid(er), ' + output_tasks[k] + ')' 
 
 #angular momentum components
@@ -121,15 +122,18 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
     # Cadence
     az_avg = lambda A: d3.Average(A, coords.coords[0])
     s2_avg = lambda A: d3.Average(A, coords.S2coordsys)
+    s2_std = lambda A: np.sqrt(s2_avg((A - s2_avg(A))**2))
 
     def integ(A):
         return d3.Integrate(A, coords)
     
     solver.problem.namespace['az_avg'] = az_avg
     solver.problem.namespace['s2_avg'] = s2_avg
+    solver.problem.namespace['s2_std'] = s2_std
     solver.problem.namespace['integ'] = integ
     namespace['az_avg'] = solver.problem.namespace['az_avg']
     namespace['s2_avg'] = solver.problem.namespace['s2_avg']
+    namespace['s2_std'] = solver.problem.namespace['s2_std']
     namespace['integ'] = solver.problem.namespace['integ']
 
     star_dir, out_file = name_star()
@@ -234,5 +238,14 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
                         task_str = 's2_avg({})'.format(fieldstr)
                         task = d3.Grid(eval(task_str, dict(solver.problem.namespace)))
                         handler.add_task(task, name='s2_avg({}_{})'.format(fieldname, bn))
+                elif this_task['type'] == 's2_std':
+                    for fieldname in this_task['fields']:
+                        fieldstr = output_tasks[fieldname].format(bn)
+                        task_str = 's2_std({})'.format(fieldstr)
+                        task = d3.Grid(eval(task_str, dict(solver.problem.namespace)))
+                        handler.add_task(task, name='s2_std({}_{})'.format(fieldname, bn))
+                else:
+                    raise NotImplementedError("Output task type not implemented: {}".format(this_task['type']))
+
 
     return analysis_tasks, even_analysis_tasks
