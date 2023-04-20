@@ -154,6 +154,100 @@ def make_NCC(basis, coords, dist, interp_func, Nmax=32, vector=False, grid_only=
         this_field.change_scales(basis.dealias)
     return this_field
 
+
+class ConvectionSimStarBuilder:
+    """
+    An abstract class for building the background stratification needed
+    for a convection simulation. The stratification is based on a MESA
+    stellar model.
+    """
+
+    def __init__(self, profile_file=None):
+        """
+        Initializes the ConvectionSimStarBuilder. Reads in the MESA profile.
+
+        Arguments
+        ---------
+        profile_file : str
+            The path to the MESA profile file to use; if None, uses the path from the config file.
+        """
+        # Read in parameters and create output directory
+        self.out_dir, self.out_file = name_star()
+        self.ncc_dict = config.nccs
+        self.resolutions = [(1, 1, nr) for nr in config.star['nr']]
+        self.dealias = config.numerics['N_dealias']
+        self.dtype = np.float64
+        self.r_bound_nd = None
+
+        # Find the path to the MESA profile file
+        package_path = Path(compstar.__file__).resolve().parent
+        stock_path = package_path.joinpath('stock_models')
+        self.mesa_file_path = None
+        if profile_file is not None and os.path.exists(profile_file):
+            self.mesa_file_path = profile_file
+        elif os.path.exists(config.star['path']):
+            self.mesa_file_path = config.star['path']
+        else:
+            stock_file_path = stock_path.joinpath(config.star['path'])
+            if os.path.exists(stock_file_path):
+                self.mesa_file_path = str(stock_file_path)
+            else:
+                raise ValueError("Cannot find MESA profile file in {} or {}".format(config.star['path'], stock_file_path))
+        logger.info('Generating stratification associated with MESA profile file: {}'.format(self.mesa_file_path))
+        self.reader = DimensionalMesaReader(self.mesa_file_path)
+
+        self._define_cz_bounds()
+        self._nondimensionalize()
+        self._construct_diffusivities()
+        self._interpolate_mesa_fields()
+        self._get_Fconv()
+        self._get_stability()
+        self._make_bases()
+        self._construct_nccs()
+
+
+    
+    def _define_cz_bounds(self):
+        """ Abstract class; must set self.r_bound_nd """
+        pass
+
+    def _nondimensionalize(self):
+        pass
+    
+    def _construct_diffusivities(self):
+        pass
+
+    def _make_bases(self):
+        """ Construct the dedalus bases """
+        stitch_radii = self.r_bound_nd[1:-1]
+        self.coords, self.dist, self.bases, self.bases_keys = make_bases(self.resolutions, stitch_radii, self.r_bound_nd[-1], dealias=(1,1,self.dealias), dtype=self.dtype, mesh=None)
+        self.dedalus_r = OrderedDict()
+        for bn in bases.keys():
+            phi, theta, r_vals = bases[bn].global_grids((1, 1, dealias))
+            self.dedalus_r[bn] = r_vals
+
+    def _interpolate_mesa_fields(self):
+        pass
+
+    def _get_Fconv(self):
+        pass
+    
+    def _get_stability(self):
+        pass
+
+    def _hydrostatic_nlbvp(self):
+        pass
+
+    def _construct_nccs(self):
+        pass
+
+    def plot_nccs(self):
+        pass
+
+    def _save_star(self):
+        pass
+
+
 def build_nccs(plot_nccs=False, grad_s_transition_default=0.03, reapply_grad_s_filter=False):
     """
     This function builds the NCCs for the star, then saves them to a file.
