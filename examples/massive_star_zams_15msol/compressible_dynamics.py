@@ -36,8 +36,8 @@ if __name__ == '__main__':
     # Read in domain bounds 
     if ncc_file is not None:
         with h5py.File(ncc_file, 'r') as f:
-            r_stitch = f['r_stitch'][()]
-            r_outer = f['r_outer'][()]
+            r_stitch = f['scalars/r_stitch'][()]
+            r_outer  = f['scalars/r_outer'][()]
     else:
         raise ValueError("NCC file cannot be 'None'")
     logger.info('r_stitch: {} / r_outer: {:.2f}'.format(r_stitch, r_outer))

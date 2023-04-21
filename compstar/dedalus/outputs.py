@@ -166,7 +166,7 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
     # Get star directory and file names
     star_dir, out_file = name_star()
     with h5py.File(out_file, 'r') as f:
-        r_outer = f['r_outer'][()]
+        r_outer = f['scalars/r_outer'][()]
 
     # Create Average and integral operations
     az_avg = lambda A: d3.Average(A, coords.coords[0])

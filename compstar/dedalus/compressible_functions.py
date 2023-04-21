@@ -516,40 +516,40 @@ class SphericalCompressibleProblem():
                     self.namespace['{}_{}'.format(k, bn)].change_scales(ncc_scales)
                 with h5py.File(self.ncc_file, 'r') as f:
                     #Thermo constants.
-                    self.namespace['Cp']['g'] = f['Cp'][()]
-                    self.namespace['R_gas']['g'] = f['R_gas'][()]
-                    self.namespace['gamma']['g'] = f['gamma1'][()]
-                    self.namespace['Cv']['g'] = f['Cp'][()] - f['R_gas'][()]
+                    self.namespace['Cp']['g'] = f['scalars/Cp'][()]
+                    self.namespace['R_gas']['g'] = f['scalars/R'][()]
+                    self.namespace['gamma']['g'] = f['scalars/gamma1'][()]
+                    self.namespace['Cv']['g'] = f['scalars/Cp'][()] - f['scalars/R'][()]
                     logger.info('using Cp: {}, Cv: {}, R_gas: {}, gamma: {}'.format(self.namespace['Cp']['g'], self.namespace['Cv']['g'], self.namespace['R_gas']['g'], self.namespace['gamma']['g']))
                     #Vectors
                     for k in self.vec_nccs:
                         self.dist.comm_cart.Barrier()
-                        if '{}_{}'.format(k, bn) not in f.keys():
+                        if '{}_{}'.format(k, bn) not in f['dedalus'].keys():
                             logger.info('skipping {}_{}, not in file'.format(k, bn))
                             continue
                         if local_vncc_size > 0:
                             logger.info('reading {}_{}'.format(k, bn))
-                            self.namespace['{}_{}'.format(k, bn)]['g'] = f['{}_{}'.format(k, bn)][:,:1,:1,grid_slices[-1]]
+                            self.namespace['{}_{}'.format(k, bn)]['g'] = f['dedalus/{}_{}'.format(k, bn)][:,:1,:1,grid_slices[-1]]
                     #Scalars
                     for k in self.scalar_nccs:
                         self.dist.comm_cart.Barrier()
-                        if '{}_{}'.format(k, bn) not in f.keys():
+                        if '{}_{}'.format(k, bn) not in f['dedalus'].keys():
                             logger.info('skipping {}_{}, not in file'.format(k, bn))
                             continue
                         logger.info('reading {}_{}'.format(k, bn))
-                        self.namespace['{}_{}'.format(k, bn)]['g'] = f['{}_{}'.format(k, bn)][:,:,grid_slices[-1]]
+                        self.namespace['{}_{}'.format(k, bn)]['g'] = f['dedalus/{}_{}'.format(k, bn)][:,:,grid_slices[-1]]
                     #Heating and density (from logrho)
-                    self.namespace['Q_{}'.format(bn)]['g']         = f['Q_{}'.format(bn)][:,:,grid_slices[-1]]
-                    self.namespace['rho0_{}'.format(bn)]['g']       = np.exp(f['ln_rho0_{}'.format(bn)][:,:,grid_slices[-1]])[None,None,:]
+                    self.namespace['Q_{}'.format(bn)]['g']         = f['dedalus/Q_{}'.format(bn)][:,:,grid_slices[-1]]
+                    self.namespace['rho0_{}'.format(bn)]['g']       = np.exp(f['dedalus/ln_rho0_{}'.format(bn)][:,:,grid_slices[-1]])[None,None,:]
 
                     #Time scales
                     if max_dt is None:
-                        max_dt = f['max_dt'][()]
+                        max_dt = f['scalars/max_dt'][()]
                     if t_buoy is None:
-                        t_buoy = f['tau_heat'][()]/f['tau_nd'][()]
+                        t_buoy = f['scalars/tau_heat'][()]/f['scalars/tau_nd'][()]
                     if t_rot is None:
                         if self.do_rotation:
-                            sim_tau_sec = f['tau_nd'][()] #sec / sim time
+                            sim_tau_sec = f['scalars/tau_nd'][()] #sec / sim time
                             sim_tau_day = sim_tau_sec / (60*60*24) # days / sim time
                             self.Omega = sim_tau_day * dimensional_Omega  # 1 / sim time
                             t_rot = 1/(2*self.Omega)
@@ -557,7 +557,7 @@ class SphericalCompressibleProblem():
                             t_rot = np.inf
                     #Damping layer
                     if self.sponge:
-                        f_brunt = f['tau_nd'][()]*np.sqrt(f['N2max_sim'][()])/(2*np.pi)
+                        f_brunt = f['scalars/tau_nd'][()]*np.sqrt(f['scalars/N2max_sim'][()])/(2*np.pi)
                         self.namespace['sponge_{}'.format(bn)]['g'] *= f_brunt
                 for k in self.vec_nccs + self.scalar_nccs + ['rho0']:
                     #Rescale down from dealias scales.

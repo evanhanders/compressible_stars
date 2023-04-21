@@ -260,7 +260,7 @@ class ConvectionSimStarBuilder:
         if config.numerics['equations'] == 'FC_HD':
             atmo = HSE_solve(self.coords, self.dist, self.bases,  self.interpolations['grad_ln_rho0'], self.N2_func, self.F_conv_func,
                             r_outer=self.r_bound_nd[-1], r_stitch=self.r_bound_nd[1:-1], \
-                            R=self.nd['R'], gamma=self.nd['gamma1'], nondim_radius=self.nd['r_nd_coord/L_nd'])
+                            R=self.nd['R'], gamma=self.nd['gamma1'], nondim_radius=self.nd['r_nd_coord'])
             self.sim_interpolations['ln_rho0']          = atmo['ln_rho']
             self.sim_interpolations['Q']                = atmo['Q']
             self.sim_interpolations['g']                = atmo['g']
@@ -334,7 +334,7 @@ class ConvectionSimStarBuilder:
             # slicing preserves dimensionality
             f.create_group('dedalus')
             for bn, basis in self.bases.items():
-                f['r_{}'.format(bn)] = self.dedalus_r[bn]
+                f['dedalus/r_{}'.format(bn)] = self.dedalus_r[bn]
                 for ncc in self.ncc_dict.keys():
                     this_field = self.ncc_dict[ncc]['field_{}'.format(bn)]
                     if self.ncc_dict[ncc]['vector']:
@@ -353,6 +353,9 @@ class ConvectionSimStarBuilder:
                 else:
                     f['scalars/{}'.format(name)] = value.value
                     f['scalars/{}'.format(name)].attrs['units'] = str(value.unit)
+            # Save simulation stitch points
+            f['scalars/r_stitch'] = self.r_bound_nd[1:-1]
+            f['scalars/r_outer']  = self.r_bound_nd[-1]
             
             # Save MESA profiles.
             f.create_group('mesa')
@@ -467,8 +470,8 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
             if i < len(self.r_bounds) - 1:
                 self.r_bools.append((structure.r > self.r_bounds[i])*(structure.r <= self.r_bounds[i+1]))
         logger.info('fraction of FULL star simulated: {:.2f}, up to r={:.3e}'.format(self.r_bounds[-1]/structure.R_star, self.r_bounds[-1]))
-        self.sim_bool      = (structure.r > self.r_bounds[0])*(structure.r <= self.r_bounds[-1])
-        self.cz_bool       = (structure.r <= self.core_cz_radius)
+        self.reader.structure['sim_bool'] = self.sim_bool      = (structure.r > self.r_bounds[0])*(structure.r <= self.r_bounds[-1])
+        self.reader.structure['cz_bool'] = self.cz_bool       = (structure.r <= self.core_cz_radius)
         logger.info('fraction of stellar mass simulated: {:.7f}'.format(structure.mass[self.sim_bool][-1]/structure.mass[-1]))
 
     def _nondimensionalize(self):
@@ -477,7 +480,7 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         self.nd = OrderedDict()
 
         # Get some rough MLT values.
-        self.nd['mlt_u'] = mlt_u = ((structure.Luminosity / (4 * np.pi * structure.r**2 * structure.rho) )**(1/3)).cgs
+        mlt_u = ((structure.Luminosity / (4 * np.pi * structure.r**2 * structure.rho) )**(1/3)).cgs
         self.nd['avg_core_u'] = avg_core_u = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r)*mlt_u)[structure.r < self.core_cz_radius]) / (4*np.pi*self.core_cz_radius**3 / 3)
         self.nd['avg_core_ma'] = avg_core_ma = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r)*mlt_u/structure.csound)[structure.r < self.core_cz_radius]) / (4*np.pi*self.core_cz_radius**3 / 3)
         logger.info('avg core velocity: {:.3e} / ma: {:.3e}'.format(avg_core_u, avg_core_ma))
@@ -495,7 +498,7 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         self.nd['H0']           = H0  = (structure.rho*structure.eps_nuc)[0]
         self.nd['tau_heat']     = tau_heat  = ((H0*L_CZ/m_core)**(-1/3)).cgs #heating timescale
         self.nd['L_nd']         = L_nd    = L_CZ
-        self.nd['r_nd_coord/L_nd'] = structure.r[structure.r==L_nd][0]/L_nd
+        self.nd['r_nd_coord']   = structure.r[structure.r==L_nd][0]/L_nd
         self.nd['m_nd']         = m_nd    = structure.rho[structure.r==L_nd][0] * L_nd**3 #mass at core cz boundary
         self.nd['T_nd']         = T_nd    = structure.T[structure.r==L_nd][0] #temp at core cz boundary
         self.nd['tau_nd']       = tau_nd  = (1/f_brunt).cgs #timescale of max N^2
