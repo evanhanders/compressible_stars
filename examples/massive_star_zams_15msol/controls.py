@@ -10,6 +10,7 @@ star['path'] = 'zams_15Msol/LOGS/profile47.data' #from stock models
 star['r_bounds'] = (0, '1.10L', '1.5L')
 star['nr'] = (64, 32)
 star['smooth_h'] = True
+star['reapply_grad_s_filter'] = True
 
 ### Numerical choices
 #Need to add a tag saying what the default diffusivity formalism is

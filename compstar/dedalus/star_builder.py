@@ -1,5 +1,6 @@
 import os
 from collections import OrderedDict
+from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -162,7 +163,7 @@ class ConvectionSimStarBuilder:
     stellar model.
     """
 
-    def __init__(self, profile_file=None):
+    def __init__(self, profile_file=None, plot=True):
         """
         Initializes the ConvectionSimStarBuilder. Reads in the MESA profile.
 
@@ -170,6 +171,8 @@ class ConvectionSimStarBuilder:
         ---------
         profile_file : str
             The path to the MESA profile file to use; if None, uses the path from the config file.
+        plot : bool
+            Whether to plot comparisons between the MESA profile and the dedalus profile.
         """
         # Read in parameters and create output directory
         self.out_dir, self.out_file = name_star()
@@ -198,57 +201,410 @@ class ConvectionSimStarBuilder:
 
         self._define_cz_bounds()
         self._nondimensionalize()
+        self._make_bases()
         self._construct_diffusivities()
         self._interpolate_mesa_fields()
         self._get_Fconv()
         self._get_stability()
-        self._make_bases()
+        self._hydrostatic_nlbvp()
         self._construct_nccs()
-
-
-    
-    def _define_cz_bounds(self):
-        """ Abstract class; must set self.r_bound_nd """
-        pass
-
-    def _nondimensionalize(self):
-        pass
-    
-    def _construct_diffusivities(self):
-        pass
-
+        self._save_star()
+        if plot:
+            self.plot_nccs()
+  
     def _make_bases(self):
         """ Construct the dedalus bases """
         stitch_radii = self.r_bound_nd[1:-1]
         self.coords, self.dist, self.bases, self.bases_keys = make_bases(self.resolutions, stitch_radii, self.r_bound_nd[-1], dealias=(1,1,self.dealias), dtype=self.dtype, mesh=None)
         self.dedalus_r = OrderedDict()
-        for bn in bases.keys():
-            phi, theta, r_vals = bases[bn].global_grids((1, 1, dealias))
+        for bn in self.bases.keys():
+            phi, theta, r_vals = self.bases[bn].global_grids((1, 1, self.dealias))
             self.dedalus_r[bn] = r_vals
 
     def _interpolate_mesa_fields(self):
+        """ creates smooth, nondimensional interpolation functions of important MESA fields. """
+        nd = SimpleNamespace(**self.nd)
+        structure = SimpleNamespace(**self.reader.structure)
+        r_nd = structure.r/nd.L_nd
+        self.interpolations = OrderedDict()
+        if config.numerics['equations'] == 'FC_HD':
+            self.interpolations['grad_s0'] = interp1d(r_nd, (structure.cp*structure.grad_s_over_cp*nd.L_nd/nd.s_nd), **interp_kwargs)
+            #self.interpolations['s0'] = interp1d(r_nd, np.cumsum(self.interpolations['grad_s0'](r_nd)*np.gradient(r_nd)), **interp_kwargs)
+            self.interpolations['ln_rho0'] = interp1d(r_nd, np.log(structure.rho/nd.rho_nd), **interp_kwargs)
+            self.interpolations['ln_T0'] = interp1d(r_nd, np.log(structure.T/nd.T_nd), **interp_kwargs)
+            self.interpolations['pom0'] = interp1d(r_nd, nd.R*structure.T/nd.T_nd, **interp_kwargs)
+            self.interpolations['grad_ln_rho0'] = interp1d(r_nd, structure.dlogrhodr*nd.L_nd, **interp_kwargs)
+            self.interpolations['grad_ln_T0'] = interp1d(r_nd, structure.dlogTdr*nd.L_nd, **interp_kwargs)
+            self.interpolations['grad_ln_pom0'] = self.interpolations['grad_ln_T0']
+            self.interpolations['T0'] = interp1d(r_nd, structure.T/nd.T_nd, **interp_kwargs)
+            self.interpolations['nu_diff'] = interp1d(r_nd, structure.nu_diff*(nd.tau_nd/nd.L_nd**2), **interp_kwargs)
+            self.interpolations['chi_rad'] = interp1d(r_nd, structure.rad_diff*(nd.tau_nd/nd.L_nd**2), **interp_kwargs)
+            self.interpolations['kappa_rad'] = lambda r: self.interpolations['chi_rad'](r)*np.exp(self.interpolations['ln_rho0'](r))*nd.Cp
+            self.interpolations['grad_kappa_rad'] = interp1d(r_nd, np.gradient(self.interpolations['kappa_rad'](r_nd), r_nd), **interp_kwargs)
+            self.interpolations['g'] = interp1d(r_nd, -structure.g * (nd.tau_nd**2/nd.L_nd), **interp_kwargs)
+            self.interpolations['g_phi'] = interp1d(r_nd, structure.g_phi * (nd.tau_nd**2 / nd.L_nd**2), **interp_kwargs)
+            self.interpolations['Q'] = interp1d(r_nd, np.gradient(structure.L_conv/nd.lum_nd, r_nd)/(4*np.pi*r_nd**2), **interp_kwargs)
+            self.interpolations['s0']  = lambda r: nd.Cp*((np.log(self.interpolations['pom0'](r)) + self.interpolations['ln_rho0'](r))*(1/nd.gamma1) - self.interpolations['ln_rho0'](r))
+        else:
+            raise ValueError("Specified equation formulation {} not supported".format(config.numerics['equations']))
+
+    def _hydrostatic_nlbvp(self):
+        """ 
+        Solves for a hydrostatic equilibrium solution using a Dedalus nonlinear boundary value problem solver. 
+        This function creates the self.sim_interpolations dictionary, which will be used for NCC construction.
+        """
+        self.sim_interpolations = deepcopy(self.interpolations)
+        nd = SimpleNamespace(**self.nd)
+        structure = SimpleNamespace(**self.reader.structure)
+        r_nd = structure.r/nd.L_nd
+        if config.numerics['equations'] == 'FC_HD':
+            atmo = HSE_solve(self.coords, self.dist, self.bases,  self.interpolations['grad_ln_rho0'], self.N2_func, self.F_conv_func,
+                            r_outer=self.r_bound_nd[-1], r_stitch=self.r_bound_nd[1:-1], \
+                            R=self.nd['R'], gamma=self.nd['gamma1'], nondim_radius=self.nd['r_nd_coord/L_nd'])
+            self.sim_interpolations['ln_rho0']          = atmo['ln_rho']
+            self.sim_interpolations['Q']                = atmo['Q']
+            self.sim_interpolations['g']                = atmo['g']
+            self.sim_interpolations['g_phi']            = atmo['g_phi']
+            self.sim_interpolations['grad_s0']          = atmo['grad_s']
+            self.sim_interpolations['s0']               = atmo['s0']
+            self.sim_interpolations['pom0']             = atmo['pomega']
+            self.sim_interpolations['grad_ln_pom0']     = atmo['grad_ln_pomega']
+            self.sim_interpolations['nu_diff']          = interp1d(r_nd, structure.sim_nu_diff, **interp_kwargs) 
+            self.sim_interpolations['chi_rad']          = interp1d(r_nd, structure.sim_rad_diff, **interp_kwargs)
+            self.sim_interpolations['kappa_rad']        = interp1d(r_nd, np.exp(self.sim_interpolations['ln_rho0'](r_nd))*nd.Cp*structure.sim_rad_diff, **interp_kwargs)
+            self.sim_interpolations['grad_kappa_rad']   = interp1d(r_nd, np.gradient(self.sim_interpolations['kappa_rad'](r_nd), r_nd), **interp_kwargs)
+        else:
+            raise ValueError("Specified equation formulation {} not supported".format(config.numerics['equations']))
+
+    def _construct_nccs(self):
+        """ Constructs simulation NCCs using Dedalus and interpolations. """
+        ## Construct Dedalus NCCs
+        for ncc in self.ncc_dict.keys():
+            for i, bn in enumerate(self.bases.keys()):
+                self.ncc_dict[ncc]['Nmax_{}'.format(bn)] = self.ncc_dict[ncc]['nr_max'][i]
+                self.ncc_dict[ncc]['field_{}'.format(bn)] = None
+            if ncc in self.sim_interpolations.keys():
+                self.ncc_dict[ncc]['interp_func'] = self.sim_interpolations[ncc]
+                self.ncc_dict[ncc]['mesa_interp_func'] = self.interpolations[ncc]
+            else:
+                self.ncc_dict[ncc]['interp_func'] = None
+                self.ncc_dict[ncc]['mesa_interp_func'] = None
+
+        #Loop over bases, then loop over the NCCs that need to be built for each basis
+        for bn, basis in self.bases.items():
+            for ncc in self.ncc_dict.keys():
+                interp_func = self.ncc_dict[ncc]['interp_func']
+                #If we have an interpolation function, build the NCC from the interpolator, 
+                # unless we're using the Dedalus gradient of another field.
+                if interp_func is not None and not self.ncc_dict[ncc]['from_grad']:
+                    Nmax = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]
+                    vector = self.ncc_dict[ncc]['vector']
+                    grid_only = self.ncc_dict[ncc]['grid_only']
+                    self.ncc_dict[ncc]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, interp_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
+                    if self.ncc_dict[ncc]['get_grad']: #If another NCC needs the gradient of this one, build it
+                        name = self.ncc_dict[ncc]['grad_name']
+                        logger.info('getting {}'.format(name))
+                        grad_field = d3.grad(self.ncc_dict[ncc]['field_{}'.format(bn)]).evaluate()
+                        grad_field.change_scales((1,1,(Nmax+1)/self.resolutions[self.bases_keys == bn][2]))
+                        grad_field.change_scales(basis.dealias)
+                        self.ncc_dict[name]['field_{}'.format(bn)] = grad_field
+                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax+1
+                    if self.ncc_dict[ncc]['get_inverse']: #If another NCC needs the inverse of this one, build it
+                        name = 'inv_{}'.format(ncc)
+                        inv_func = lambda r: 1/interp_func(r)
+                        self.ncc_dict[name]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, inv_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
+                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax
+
+            # Special case for gravity; we build the NCC from the potential, then take the gradient, which is -g.
+            if 'neg_g' in self.ncc_dict.keys():
+                if 'g' not in self.ncc_dict.keys():
+                    self.ncc_dict['g'] = OrderedDict()
+                name = 'g'
+                self.ncc_dict['g']['field_{}'.format(bn)] = (-self.ncc_dict['neg_g']['field_{}'.format(bn)]).evaluate()
+                self.ncc_dict['g']['vector'] = True
+                self.ncc_dict['g']['interp_func'] = self.sim_interpolations['g']
+                self.ncc_dict['g']['mesa_interp_func'] = self.interpolations['g']
+                self.ncc_dict['g']['Nmax_{}'.format(bn)] = self.ncc_dict['neg_g']['Nmax_{}'.format(bn)]
+                self.ncc_dict['g']['from_grad'] = True 
+
+    def _save_star(self):
+        """ Save NCC dictionary, nondimensionalization, and MESA profiles to a file """
+        with h5py.File('{:s}'.format(self.out_file), 'w') as f:
+            # Save Dedalus fields.
+            # slicing preserves dimensionality
+            f.create_group('dedalus')
+            for bn, basis in self.bases.items():
+                f['r_{}'.format(bn)] = self.dedalus_r[bn]
+                for ncc in self.ncc_dict.keys():
+                    this_field = self.ncc_dict[ncc]['field_{}'.format(bn)]
+                    if self.ncc_dict[ncc]['vector']:
+                        f['dedalus/{}_{}'.format(ncc, bn)] = this_field['g'][:, :1,:1,:]
+                        f['dedalus/{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
+                    else:
+                        f['dedalus/{}_{}'.format(ncc, bn)] = this_field['g'][:1,:1,:]
+                        f['dedalus/{}_{}'.format(ncc, bn)].attrs['rscale_{}'.format(bn)] = self.ncc_dict[ncc]['Nmax_{}'.format(bn)]/self.resolutions[self.bases_keys == bn][2]
+        
+            # Save nondimensionalization quantities.
+            f.create_group('scalars')
+            for name, value in self.nd.items():
+                if not isinstance(value, u.Quantity):
+                    f['scalars/{}'.format(name)] = value
+                    f['scalars/{}'.format(name)].attrs['units'] = 'dimensionless'
+                else:
+                    f['scalars/{}'.format(name)] = value.value
+                    f['scalars/{}'.format(name)].attrs['units'] = str(value.unit)
+            
+            # Save MESA profiles.
+            f.create_group('mesa')
+            for name, value in self.reader.structure.items():
+                if not isinstance(value, u.Quantity):
+                    f['mesa/{}'.format(name)] = value
+                    f['mesa/{}'.format(name)].attrs['units'] = 'dimensionless'
+                else:
+                    f['mesa/{}'.format(name)] = value.value
+                    f['mesa/{}'.format(name)].attrs['units'] = str(value.unit)
+
+        logger.info('finished saving NCCs to {}'.format(self.out_file))
+         
+    def plot_nccs(self):
+        """ Makes plots comparing the NCCs to the MESA model. """
+        nd = SimpleNamespace(**self.nd)
+        structure = SimpleNamespace(**self.reader.structure)
+        r_nd = structure.r/nd.L_nd
+        #Plot the NCCs
+        for ncc in self.ncc_dict.keys():
+            if self.ncc_dict[ncc]['interp_func'] is None:
+                continue
+            logger.info('plotting {}'.format(ncc))
+            axhline = None
+            log = False
+            ylim = None
+            rvals = []
+            dedalus_yvals = []
+            nvals = []
+            for bn, basis in self.bases.items():
+                rvals.append(self.dedalus_r[bn].ravel())
+                nvals.append(self.ncc_dict[ncc]['Nmax_{}'.format(bn)])
+                if self.ncc_dict[ncc]['vector']:
+                    dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][2,0,0,:]))
+                else:
+                    dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][0,0,:]))
+            
+            interp_func = self.ncc_dict[ncc]['mesa_interp_func']
+            if config.numerics['equations'] == 'FC_HD':
+                if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad', 'nu_diff']:
+                    log = True
+                if ncc == 'grad_s0': 
+                    axhline = (nd.s_motions / nd.s_nd)
+        
+                if ncc in ['grad_T', 'grad_kappa_rad']:
+                    this_interp_func = lambda r: -interp_func(r)
+                    ylabel='-{}'.format(ncc)
+                    for i in range(len(dedalus_yvals)):
+                        dedalus_yvals[i] *= -1
+                else:
+                    ylabel = ncc
+                    this_interp_func = interp_func
+
+            plot_ncc_figure(rvals, this_interp_func, dedalus_yvals, Ns=nvals, \
+                        ylabel=ylabel, fig_name=ncc, out_dir=self.out_dir, log=log, ylim=ylim, \
+                        r_int=self.r_bound_nd[1:-1], axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
+        logger.info('We recommend looking at the plots in {}/ to make sure the non-constant coefficients look reasonable'.format(self.out_dir))
+   
+    def _define_cz_bounds(self):
+        """ Abstract class; must set self.r_bounds. Also defines a boolean array self.cz_bool that is the size of the MESA grid """
         pass
 
+    def _nondimensionalize(self):
+        """ Creates and fills the dictionary self.nd which contains scalar quantities used for nondimensionalization with astropy units.
+         Also defines self.r_bounds_nd, which is the nondimensionalized radius bounds of the simulation bases. """
+        pass
+    
+    def _construct_diffusivities(self):
+        """ Define the diffusivities to use in the simulation. Adds the following keys to self.reader.structure: 'sim_nu_diff', 'sim_rad_diff'"""
+        pass
+    
     def _get_Fconv(self):
+        """ defines a function self.F_conv_func which returns the convective flux at a given nondimensional simulation radius """
         pass
     
     def _get_stability(self):
+        """ 
+        Defines the stability profile in the simulation.
+        If equation formulation is FC_HD, defines the the function self.N2_func
+        """
         pass
 
-    def _hydrostatic_nlbvp(self):
-        pass
+class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
+    """ Builds the NCCs for a massive star's core convection zone and radiative envelope. """
+
+    def __init__(self, *args, grad_s_transition_default=0.03, **kwargs):
+        self.grad_s_transition_default = grad_s_transition_default
+        super().__init__(*args, **kwargs)
+
+    def _define_cz_bounds(self):
+        """ Abstract class; must set self.r_bounds and self.r_bools. 
+        Also defines two boolean arrays: self.sim_bool and self.cz_bool that are the size of the MESA grid """
+        structure = SimpleNamespace(**self.reader.structure)
+        self.core_cz_radius = find_core_cz_radius(self.mesa_file_path, dimensionless=False)
+        
+        # Specify fraction of total star to simulate
+        self.r_bounds = list(config.star['r_bounds'])
+        self.r_bools = []
+        for i, rb in enumerate(self.r_bounds):
+            if type(rb) == str:
+                if 'R' in rb:
+                    self.r_bounds[i] = float(rb.replace('R', ''))*structure.R_star
+                elif 'L' in rb:
+                    self.r_bounds[i] = float(rb.replace('L', ''))*self.core_cz_radius
+                else:
+                    try:
+                        self.r_bounds[i] = float(self.r_bounds[i]) * u.cm
+                    except:
+                        raise ValueError("index {} ('{}') of r_bounds is poorly specified".format(i, rb))
+                self.r_bounds[i] = self.core_cz_radius*np.around(self.r_bounds[i]/self.core_cz_radius, decimals=2)
+        for i, rb in enumerate(self.r_bounds):
+            if i < len(self.r_bounds) - 1:
+                self.r_bools.append((structure.r > self.r_bounds[i])*(structure.r <= self.r_bounds[i+1]))
+        logger.info('fraction of FULL star simulated: {:.2f}, up to r={:.3e}'.format(self.r_bounds[-1]/structure.R_star, self.r_bounds[-1]))
+        self.sim_bool      = (structure.r > self.r_bounds[0])*(structure.r <= self.r_bounds[-1])
+        self.cz_bool       = (structure.r <= self.core_cz_radius)
+        logger.info('fraction of stellar mass simulated: {:.7f}'.format(structure.mass[self.sim_bool][-1]/structure.mass[-1]))
+
+    def _nondimensionalize(self):
+        """ Creates and fills the dictionary self.nd which contains scalar quantities used for nondimensionalization with astropy units. """
+        structure = SimpleNamespace(**self.reader.structure)
+        self.nd = OrderedDict()
+
+        # Get some rough MLT values.
+        self.nd['mlt_u'] = mlt_u = ((structure.Luminosity / (4 * np.pi * structure.r**2 * structure.rho) )**(1/3)).cgs
+        self.nd['avg_core_u'] = avg_core_u = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r)*mlt_u)[structure.r < self.core_cz_radius]) / (4*np.pi*self.core_cz_radius**3 / 3)
+        self.nd['avg_core_ma'] = avg_core_ma = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r)*mlt_u/structure.csound)[structure.r < self.core_cz_radius]) / (4*np.pi*self.core_cz_radius**3 / 3)
+        logger.info('avg core velocity: {:.3e} / ma: {:.3e}'.format(avg_core_u, avg_core_ma))
+
+        #Get N2 info
+        self.nd['N2max_sim']    = N2max_sim = structure.N2[self.sim_bool].max()
+        shell_points = np.sum(self.sim_bool*(structure.r > self.core_cz_radius))
+        self.nd['N2plateau']    = N2plateau = np.median(structure.N2[structure.r > self.core_cz_radius][int(shell_points*0.25):int(shell_points*0.75)])
+        self.nd['f_brunt']      = f_brunt = np.sqrt(N2max_sim)/(2*np.pi)
+    
+        #Nondimensionalization
+        self.nd['L_CZ']         = L_CZ    = self.core_cz_radius
+        self.nd['m_core']       = m_core  = structure.rho[0] * L_CZ**3
+        self.nd['T_core']       = T_core  = structure.T[0]
+        self.nd['H0']           = H0  = (structure.rho*structure.eps_nuc)[0]
+        self.nd['tau_heat']     = tau_heat  = ((H0*L_CZ/m_core)**(-1/3)).cgs #heating timescale
+        self.nd['L_nd']         = L_nd    = L_CZ
+        self.nd['r_nd_coord/L_nd'] = structure.r[structure.r==L_nd][0]/L_nd
+        self.nd['m_nd']         = m_nd    = structure.rho[structure.r==L_nd][0] * L_nd**3 #mass at core cz boundary
+        self.nd['T_nd']         = T_nd    = structure.T[structure.r==L_nd][0] #temp at core cz boundary
+        self.nd['tau_nd']       = tau_nd  = (1/f_brunt).cgs #timescale of max N^2
+        self.nd['rho_nd']       = rho_nd  = m_nd/L_nd**3
+        self.nd['u_nd']         = u_nd    = L_nd/tau_nd
+        self.nd['s_nd']         = s_nd    = L_nd**2 / tau_nd**2 / T_nd
+        self.nd['H_nd']         = H_nd    = (m_nd / L_nd) * tau_nd**-3
+        self.nd['s_motions']    = s_motions    = L_nd**2 / tau_heat**2 / structure.T[0]
+        self.nd['lum_nd']       = lum_nd  = L_nd**2 * m_nd / (tau_nd**2) / tau_nd
+        self.nd['R']            = nondim_R_gas = (constants.R.cgs / structure.mu[0] / s_nd).cgs.value
+        self.nd['gamma1']       = nondim_gamma1 = (structure.gamma1[0]).value
+        self.nd['Cp']           = nondim_cp = nondim_R_gas * nondim_gamma1 / (nondim_gamma1 - 1)
+        self.nd['u_heat_nd']    = u_heat_nd = (L_nd/tau_heat) / u_nd
+        self.nd['Ma2_r0']       = Ma2_r0 = ((u_nd*(tau_nd/tau_heat))**2 / ((structure.gamma1[0]-1)*structure.cp[0]*structure.T[0])).cgs
+        logger.info('Nondimensionalization: L_nd = {:.2e}, T_nd = {:.2e}, m_nd = {:.2e}, tau_nd = {:.2e}'.format(L_nd, T_nd, m_nd, tau_nd))
+        logger.info('Thermo: Cp/s_nd: {:.2e}, R_gas/s_nd: {:.2e}, gamma1: {:.4f}'.format(nondim_cp, nondim_R_gas, nondim_gamma1))
+        logger.info('m_nd/M_\odot: {:.3f}'.format((m_nd/constants.M_sun).cgs))
+        logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(Ma2_r0), tau_heat))
+        
+        # Get some timestepping & wave frequency info
+        self.nd['f_nyq'] = f_nyq = 2*tau_nd*np.sqrt(N2max_sim)/(2*np.pi)
+        self.nd['nyq_dt'] = nyq_dt   = (1/f_nyq) 
+        self.nd['kepler_tau'] = kepler_tau     = 30*60*u.s
+        self.nd['max_dt_kepler'] = max_dt_kepler  = kepler_tau/tau_nd
+        self.nd['max_dt'] = max_dt_kepler
+        logger.info('needed nyq_dt is {} s / {} % of a nondimensional time (Kepler 30 min is {} %) '.format(nyq_dt*tau_nd, nyq_dt*100, max_dt_kepler*100))
+        
+        #MESA radial values at simulation joints & across full star in simulation units
+        self.r_bound_nd = [(rb/L_nd).value for rb in self.r_bounds]
+        self.r_nd = (structure.r/L_nd).cgs
+
+        self.grad_s_width = self.grad_s_transition_default
+        self.grad_s_width *= (L_CZ/L_nd).value
+        self.grad_s_transition_point = self.r_bound_nd[1] - self.grad_s_width
+        logger.info('using grad s transition point = {}'.format(self.grad_s_transition_point))
+        logger.info('using grad s width = {}'.format(self.grad_s_width))
+
+    def _interpolate_mesa_fields(self):
+        #Adjust g_phi constant
+        super()._interpolate_mesa_fields()
+        structure = SimpleNamespace(**self.reader.structure)
+        nd = SimpleNamespace(**self.nd)
+        r_nd = structure.r/nd.L_nd
+        self.interpolations['g_phi'] = interp1d(r_nd, (structure.g_phi - structure.g_phi[r_nd > self.r_bound_nd[-1]][0])* (nd.tau_nd**2 / nd.L_nd**2) , **interp_kwargs)
+
+    def _construct_diffusivities(self):
+        """ Define the diffusivities to use in the simulation. Adds the following keys to self.reader.structure: 'sim_nu_diff', 'sim_rad_diff'"""
+        #construct diffusivity profiles which will be used in simulation.
+        structure = SimpleNamespace(**self.reader.structure)
+        nd = SimpleNamespace(**self.nd)
+        rad_diff_nd = structure.rad_diff * (nd.tau_nd / nd.L_nd**2)
+        self.nd['rad_diff_cutoff'] = rad_diff_cutoff = (1/(config.numerics['prandtl']*config.numerics['reynolds_target'])) * ((nd.L_CZ**2/nd.tau_heat) / (nd.L_nd**2/nd.tau_nd))
+        self.reader.structure['sim_rad_diff'] = sim_rad_diff = np.copy(rad_diff_nd) + rad_diff_cutoff
+        self.reader.structure['sim_nu_diff'] = sim_nu_diff = config.numerics['prandtl']*rad_diff_cutoff*np.ones_like(sim_rad_diff)
+        logger.info('rad_diff cutoff: {:.3e}'.format(rad_diff_cutoff))
+        logger.info('rad_diff cutoff (dimensional): {:.3e}'.format(rad_diff_cutoff * (nd.L_nd**2/nd.tau_nd)))
+    
+    def _get_Fconv(self):
+        """ defines a function self.F_conv_func which returns the convective flux at a given nondimensional simulation radius """
+        structure = SimpleNamespace(**self.reader.structure)
+        nd = SimpleNamespace(**self.nd)
+        # Construct convective flux function which determines how convection is driven
+        if config.star['smooth_h']:
+            #smooth CZ-RZ transition
+            L_conv_sim = np.copy(structure.L_conv)
+            L_conv_sim *= one_to_zero(structure.r, 0.9*self.core_cz_radius, width=0.05*self.core_cz_radius)
+            L_conv_sim *= one_to_zero(structure.r, 0.95*self.core_cz_radius, width=0.05*self.core_cz_radius)
+            L_conv_sim /= (structure.r/nd.L_nd)**2 * (4*np.pi)
+            self.F_conv_func = interp1d(structure.r/nd.L_nd, L_conv_sim/nd.lum_nd, **interp_kwargs)
+        else:
+            raise NotImplementedError("must use smooth_h")
+    
+    def _get_stability(self):
+        """ 
+        Defines the stability profile in the simulation.
+        If equation formulation is FC_HD, defines the the function self.N2_func
+        """
+        structure = SimpleNamespace(**self.reader.structure)
+        nd = SimpleNamespace(**self.nd)
+    
+        #Build a nice function for our basis in the ball
+        #have N^2 = A*r^2 + B; grad_N2 = 2 * A * r, so A = (grad_N2) / (2 * r_stitch) & B = stitch_value - A*r_stitch^2
+        stitch_point = self.bases['B'].radius
+        stitch_value = np.interp(stitch_point, structure.r/nd.L_nd, structure.N2)
+        grad_N2_stitch = np.gradient(structure.N2, structure.r)[structure.r/nd.L_nd < stitch_point][-1]
+        A = grad_N2_stitch / (2*self.bases['B'].radius * nd.L_nd)
+        B = stitch_value - A* (self.bases['B'].radius * nd.L_nd)**2
+        smooth_N2 = np.copy(structure.N2)
+        smooth_N2[structure.r/nd.L_nd < stitch_point] = A*(structure.r[structure.r/nd.L_nd < stitch_point])**2 + B
+        smooth_N2 *= zero_to_one(structure.r/nd.L_nd, self.grad_s_transition_point, width=self.grad_s_width)
+
+        # Solve for hydrostatic equilibrium for background
+        self.N2_func = interp1d(structure.r/nd.L_nd, nd.tau_nd**2 * smooth_N2, **interp_kwargs)
 
     def _construct_nccs(self):
-        pass
+        """ Constructs simulation NCCs using Dedalus and interpolations. """
+        super()._construct_nccs()
+        #Force more zeros in the CZ if requested. Uses all available coefficients in the expansion of grad s0.
+        if config.star['reapply_grad_s_filter']:
+            for bn, basis in self.bases.items():
+                self.ncc_dict['grad_s0']['field_{}'.format(bn)]['g'] *= zero_to_one(self.dedalus_r[bn], self.grad_s_transition_point-5*self.grad_s_width, width=self.grad_s_width)
+                self.ncc_dict['grad_s0']['field_{}'.format(bn)]['c'] *= 1
+                self.ncc_dict['grad_s0']['field_{}'.format(bn)]['g'] 
 
-    def plot_nccs(self):
-        pass
-
-    def _save_star(self):
-        pass
+def build_nccs(plot_nccs=True, grad_s_transition_default=0.03, reapply_grad_s_filter=False):
+    builder = MassiveCoreStarBuilder(plot=plot_nccs, grad_s_transition_default=grad_s_transition_default)
 
 
-def build_nccs(plot_nccs=False, grad_s_transition_default=0.03, reapply_grad_s_filter=False):
+def build_nccs_old(plot_nccs=False, grad_s_transition_default=0.03, reapply_grad_s_filter=False):
     """
     This function builds the NCCs for the star, then saves them to a file.
     TODO: This function is a bit of a mess, and should be cleaned up. It should be turned into a class.
@@ -369,7 +725,6 @@ def build_nccs(plot_nccs=False, grad_s_transition_default=0.03, reapply_grad_s_f
     r_bound_nd = [(rb/L_nd).value for rb in r_bounds]
     r_nd = (r/L_nd).cgs
     
-  
     ### Make dedalus domain and bases
     resolutions = [(1, 1, nr) for nr in config.star['nr']]
     stitch_radii = r_bound_nd[1:-1]
@@ -720,7 +1075,3 @@ def build_nccs(plot_nccs=False, grad_s_transition_default=0.03, reapply_grad_s_f
     plt.ylabel("grad_ln_pom0")
     plt.savefig('star/ln_thermo_goodness.png')
 #    plt.show()
-
-
-
-
