@@ -14,16 +14,21 @@ logger = logging.getLogger(__name__)
 #Each one is defined for each basis in the simulation domain.
 #TODO: clean this up, this is horrible.
 output_tasks = {}
-flux_tags = ['cond', 'KE', 'PE', 'enth', 'visc']
+flux_tags = ['cond', 'cond_superad', 'KE', 'PE', 'enth', 'visc', 'conv', 'entropy']
 defaults = ['u', 'momentum', 'ur', 'u_squared', 'KE', 'PE', 'IE', 'TotE', 'PE1', 'IE1', 'FlucE', 'Re', 'Ma', 'ln_rho1', \
+            'enstrophy','therm_visc_lum', 'L_heat', 'integ_by_parts_1', 'integ_by_parts_2', 'integ_by_parts_3',\
             'pom1', 'pom2', 'pom_fluc', 'pom_full', 'grad_s1', 'L', 's1', 'rho_full', 'rho_fluc', 'enthalpy_fluc', 'N2', \
-            'Q_source', 'visc_source_KE', 'visc_source_IE', 'tot_visc_source',\
-            'divRad_source', 'PdV_source_KE', 'PdV_source_IE', 'tot_PdV_source',\
+            'Q_source', 'visc_source_KE', 'visc_source_IE', 'tot_visc_source', 'T_superad_z','T_superad1_z',\
+            'therm_diss_1', 'therm_diss_2', 'therm_diss_3',\
+            'divRad_source', 'PdV_source_KE', 'PdV_source_IE', 'tot_PdV_source', 'PdV_source_anelastic', \
             'source_KE', 'source_IE', 'tot_source',\
             'EOS_goodness', 'EOS_goodness_bg']
 
 for k in defaults + ['F_{}'.format(t) for t in flux_tags]:
     output_tasks[k] = '{}'.format(k) + '_{0}'
+
+for k in ['F_{}'.format(t) for t in flux_tags] + ['grad_s1',]:
+    output_tasks[k+'_r'] = 'dot(Grid(er), ' + output_tasks[k] + ')' 
 
 #angular momentum components
 output_tasks['Lx'] = 'dot(ex_{0},L_{0})'

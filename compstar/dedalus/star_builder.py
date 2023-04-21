@@ -246,6 +246,7 @@ class ConvectionSimStarBuilder:
             self.interpolations['Q'] = interp1d(r_nd, np.gradient(structure.L_conv/nd.lum_nd, r_nd)/(4*np.pi*r_nd**2), **interp_kwargs)
             self.interpolations['grad_T0_superad'] = interp1d(r_nd, structure.dTdr_superad*nd.L_nd/nd.T_nd, **interp_kwargs)
             self.interpolations['s0']  = lambda r: nd.Cp*((np.log(self.interpolations['pom0'](r)) + self.interpolations['ln_rho0'](r))*(1/nd.gamma1) - self.interpolations['ln_rho0'](r))
+            self.interpolations['L_heat'] = interp1d(r_nd, structure.L_conv/nd.lum_nd, **interp_kwargs)
         else:
             raise ValueError("Specified equation formulation {} not supported".format(config.numerics['equations']))
 
@@ -270,6 +271,7 @@ class ConvectionSimStarBuilder:
             self.sim_interpolations['s0']               = atmo['s0']
             self.sim_interpolations['pom0']             = atmo['pomega']
             self.sim_interpolations['grad_ln_pom0']     = atmo['grad_ln_pomega']
+            self.sim_interpolations['L_heat']           = atmo['L_heat']
             self.sim_interpolations['nu_diff']          = interp1d(r_nd, structure.sim_nu_diff, **interp_kwargs) 
             self.sim_interpolations['chi_rad']          = interp1d(r_nd, structure.sim_rad_diff, **interp_kwargs)
             self.sim_interpolations['kappa_rad']        = interp1d(r_nd, np.exp(self.sim_interpolations['ln_rho0'](r_nd))*nd.Cp*structure.sim_rad_diff, **interp_kwargs)
@@ -294,6 +296,7 @@ class ConvectionSimStarBuilder:
         #Loop over bases, then loop over the NCCs that need to be built for each basis
         for bn, basis in self.bases.items():
             for ncc in self.ncc_dict.keys():
+                logger.info('constructing NCC {}_{}'.format(ncc, bn))
                 interp_func = self.ncc_dict[ncc]['interp_func']
                 #If we have an interpolation function, build the NCC from the interpolator, 
                 # unless we're using the Dedalus gradient of another field.
@@ -304,7 +307,7 @@ class ConvectionSimStarBuilder:
                     self.ncc_dict[ncc]['field_{}'.format(bn)] = make_NCC(basis, self.coords, self.dist, interp_func, Nmax=Nmax, vector=vector, grid_only=grid_only, ncc_cutoff=config.numerics['ncc_cutoff'])
                     if self.ncc_dict[ncc]['get_grad']: #If another NCC needs the gradient of this one, build it
                         name = self.ncc_dict[ncc]['grad_name']
-                        logger.info('getting {}'.format(name))
+                        logger.info('getting grad {}'.format(name))
                         grad_field = d3.grad(self.ncc_dict[ncc]['field_{}'.format(bn)]).evaluate()
                         grad_field.change_scales((1,1,(Nmax+1)/self.resolutions[self.bases_keys == bn][2]))
                         grad_field.change_scales(basis.dealias)

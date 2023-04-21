@@ -89,7 +89,7 @@ class SphericalCompressibleProblem():
         self.scalar_fields = ['ln_rho1', 's1', 'Q', 'ones'] 
         self.vec_taus = ['tau_u']
         self.scalar_taus =  ['tau_s']
-        self.vec_nccs = ['grad_pom0', 'grad_ln_pom0', 'grad_ln_rho0', 'grad_s0', 'g', 'rvec', 'grad_nu_diff', 'grad_chi_rad', 'grad_kappa_rad']
+        self.vec_nccs = ['grad_pom0', 'grad_ln_pom0', 'grad_ln_rho0', 'grad_s0', 'g', 'rvec', 'grad_nu_diff', 'grad_chi_rad', 'grad_kappa_rad', 'grad_T0_superad', 'L_heat']
         self.scalar_nccs = ['pom0', 'rho0', 'ln_rho0', 'g_phi', 'nu_diff', 'kappa_rad', 'chi_rad', 's0', 'inv_pom0']
         self.sphere_unit_vectors = ['ephi', 'etheta', 'er']
         self.cartesian_unit_vectors = ['ex', 'ey', 'ez']
@@ -382,6 +382,7 @@ class SphericalCompressibleProblem():
             # Full pomega, including background and fluctuations.
             self.namespace['grad_pom_full_{}'.format(bn)] = grad_pom_full = (grid_grad_pom0 + grad_pom_fluc)
             self.namespace['pom_full_{}'.format(bn)] = pom_full = (grid_pom0 + pom_fluc)
+            self.namespace['T_full_{}'.format(bn)] = T_full = pom_full / grid_R
             self.namespace['inv_pom_full_{}'.format(bn)] = inv_pom_full = d3.Grid(1/pom_full)
             self.namespace['grad_pom2_over_pom0_{}'.format(bn)] = grad_pom2_over_pom0 = grad_pom1_over_pom0_RHS*pom_fluc_over_pom0
 
@@ -451,13 +452,22 @@ class SphericalCompressibleProblem():
             self.namespace['FlucE_linear_RHS_{}'.format(bn)] = grid_rho0*(grid_cv_div_R*pom1_RHS + d3.Grid(grid_g_phi + grid_cv_div_R*grid_pom0)*ln_rho1) #linear energy (fluctuations; RHS form)
             self.namespace['Re_{}'.format(bn)] = np.sqrt(u_squared) * d3.Grid(1/nu_diff) #Reynolds number
             self.namespace['Ma_{}'.format(bn)] = np.sqrt(u_squared) / np.sqrt(pom_full) #Mach number
+            self.namespace['vorticity_{}'.format(bn)] = vorticity = d3.curl(u)
+            self.namespace['enstrophy_{}'.format(bn)] = vorticity@vorticity
             self.namespace['L_{}'.format(bn)] = d3.cross(rvec, momentum) #angular momentum
+
+            #Superadiabatic temperature gradients and fluxes.
+            grad_T0_superad = d3.Grid(self.namespace['grad_T0_superad_{}'.format(bn)]*ones).evaluate()
+            self.namespace['T_superad_z_{}'.format(bn)] = T_superad_z = grad_pom_fluc/R_gas + grad_T0_superad
+            self.namespace['T_superad1_z_{}'.format(bn)] = T_superad1_z = grad_pom1_RHS/R_gas + grad_T0_superad
+            self.namespace['F_cond_superad_{}'.format(bn)] = F_cond_superad = -1*kappa_rad*(T_superad1_z)
 
             #Fluxes
             self.namespace['F_KE_{}'.format(bn)] = F_KE = u * KE #kinetic energy flux
             self.namespace['F_PE_{}'.format(bn)] = F_PE = u * PE #gravitational potential energy flux
             self.namespace['F_enth_{}'.format(bn)] = F_enth = grid_cp_div_R * momentum * pom_full #enthalpy flux
             self.namespace['F_visc_{}'.format(bn)] = F_visc = d3.Grid(-nu_diff)*momentum@sigma_RHS #viscous flux
+            self.namespace['F_conv_{}'.format(bn)] = F_conv = rho_full*T_full*s_full*u #not the actual convective flux, but a good approx.
 
             #Waves
             self.namespace['N2_{}'.format(bn)] = N2 = grad_s_full@d3.Grid(-g/Cp) #Brunt-Vaisala frequency squared
@@ -471,6 +481,7 @@ class SphericalCompressibleProblem():
 
             self.namespace['PdV_source_KE_{}'.format(bn)] = PdV_source_KE = momentum @ (-d3.grad(P_full)/rho_full)  #pressure-volume work in momentum eqn
             self.namespace['PdV_source_IE_{}'.format(bn)] = PdV_source_IE =  - P_full*div_u #pressure-volume work in energy eqn
+            self.namespace['PdV_source_anelastic_{}'.format(bn)] = PdV_source_anelastic = rho_full*(s1/Cp)*u@g
             self.namespace['tot_PdV_source_{}'.format(bn)] = tot_PdV_source = PdV_source_KE + PdV_source_IE #total pressure-volume source term (should be zero)
 
             self.namespace['divRad_source_{}'.format(bn)] = divRad_source = (P_full/grid_R)*(full_div_rad_flux_pt1 + full_div_rad_flux_pt2 + div_rad_flux_L) #energy production of radiative flux divergence
@@ -478,6 +489,21 @@ class SphericalCompressibleProblem():
             self.namespace['source_KE_{}'.format(bn)] = visc_source_KE + PdV_source_KE #g term turns into dt(PE) + div(u*PE); do not include here while trying to solve for dt(KE) + div(u*KE).
             self.namespace['source_IE_{}'.format(bn)] = visc_source_IE + PdV_source_IE + Q_source + divRad_source
             self.namespace['tot_source_{}'.format(bn)] = self.namespace['source_KE_{}'.format(bn)] + self.namespace['source_IE_{}'.format(bn)]
+
+            #Entropy dissipation terms
+            flux_to_lum = 4*np.pi*r_vals**2
+            L_heat = self.namespace['L_heat_{}'.format(bn)]*ones
+            integ_by_parts_T = (1/T_full)**2 * (grad_pom_full/grid_R)
+            self.namespace['F_entropy_{}'.format(bn)] = F_entropy = rho_full*s_full*u
+            self.namespace['therm_visc_lum_{}'.format(bn)] = visc_source_IE  * (grid_R/pom_full) * flux_to_lum
+            self.namespace['integ_by_parts_1_{}'.format(bn)] = (L_heat - flux_to_lum*F_cond) / T_full
+            self.namespace['integ_by_parts_2_{}'.format(bn)] = L_heat@integ_by_parts_T 
+            self.namespace['integ_by_parts_3_{}'.format(bn)] = -flux_to_lum*F_cond@integ_by_parts_T 
+
+            s_prime = s1/(pom_full/grid_R)
+            self.namespace['therm_diss_1_{}'.format(bn)] = therm_diss_1 = F_cond@d3.grad(s_prime)
+            self.namespace['therm_diss_2_{}'.format(bn)] = therm_diss_2 = s_prime*visc_source_IE
+            self.namespace['therm_diss_3_{}'.format(bn)] = therm_diss_3 = s_prime*Q_source
         return self.namespace
 
     def fill_structure(self, scales=None, dimensional_Omega=None):

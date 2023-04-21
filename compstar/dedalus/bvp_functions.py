@@ -142,6 +142,7 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
         namespace['r_vec_g_{}'.format(k)] = r_vec@g
         namespace['g_op_{}'.format(k)] = gamma * pomega * (grad_s/Cp + grad_ln_rho)
         namespace['s0_{}'.format(k)] = Cp * ((1/gamma)*(ln_pomega + ln_rho) - ln_rho) #s with an offset so s0 = cp * (1/gamma * lnP - ln_rho)
+        namespace['L_heat_{}'.format(k)] = 4*np.pi*r_squared*Fconv
 
     namespace['pi'] = np.pi
     locals().update(namespace)
@@ -223,7 +224,7 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     # Stitch together the fields for creation of interpolators that span the full simulation domain.
     #Need: grad_pom0, grad_ln_pom0, grad_ln_rho0, grad_s0, g, pom0, rho0, ln_rho0, g_phi
     stitch_fields = OrderedDict()
-    fields = ['grad_pomega', 'grad_ln_pomega', 'grad_ln_rho', 'grad_s', 'g', 'pomega', 'rho', 'ln_rho', 'g_phi', 'r_vec', 'HSE', 'N2_op', 'Q', 's0']
+    fields = ['grad_pomega', 'grad_ln_pomega', 'grad_ln_rho', 'grad_s', 'g', 'pomega', 'rho', 'ln_rho', 'g_phi', 'r_vec', 'HSE', 'N2_op', 'Q', 's0', 'L_heat']
     for f in fields:
         stitch_fields[f] = []
     
@@ -253,6 +254,7 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     N2 = stitch_fields['N2_op'].ravel()
     Q = stitch_fields['Q'].ravel()
     s0 = stitch_fields['s0'].ravel()
+    L_heat = stitch_fields['L_heat'][2,:].ravel()
 
 
     #Plot the results.
@@ -276,7 +278,7 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     ax4.legend()
     ax5.plot(r, g, label='g')
     ax5.legend()
-    ax6.plot(r, g_phi, label='g_phi')
+    ax6.plot(r, L_heat, label='L_heat')
     ax6.legend()
     ax7.plot(r, N2, label=r'$N^2$')
     ax7.plot(r, -N2, label=r'$-N^2$')
@@ -305,4 +307,5 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     atmosphere['N2'] = interp1d(r, N2, **interp_kwargs)
     atmosphere['Q'] = interp1d(r, Q, **interp_kwargs)
     atmosphere['s0'] = interp1d(r, s0, **interp_kwargs)
+    atmosphere['L_heat'] = interp1d(r, L_heat, **interp_kwargs)
     return atmosphere
