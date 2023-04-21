@@ -61,9 +61,12 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     """
     # Parameters
     namespace = dict()
-    namespace['R'] = R
-    namespace['Cp'] = Cp = R*gamma/(gamma-1)
-    namespace['gamma'] = gamma
+    namespace['R'] = dist.Field(name='R')
+    namespace['R']['g'] = R
+    namespace['Cp'] = Cp = dist.Field(name='Cp')
+    namespace['Cp']['g'] = R*gamma/(gamma-1)
+    namespace['gamma'] = dist.Field(name='gamma')
+    namespace['gamma']['g'] = gamma
     namespace['log'] = np.log
 
     #Loop over bases, set up fields and operators.

@@ -244,6 +244,7 @@ class ConvectionSimStarBuilder:
             self.interpolations['g'] = interp1d(r_nd, -structure.g * (nd.tau_nd**2/nd.L_nd), **interp_kwargs)
             self.interpolations['g_phi'] = interp1d(r_nd, structure.g_phi * (nd.tau_nd**2 / nd.L_nd**2), **interp_kwargs)
             self.interpolations['Q'] = interp1d(r_nd, np.gradient(structure.L_conv/nd.lum_nd, r_nd)/(4*np.pi*r_nd**2), **interp_kwargs)
+            self.interpolations['grad_T0_superad'] = interp1d(r_nd, structure.dTdr_superad*nd.L_nd/nd.T_nd, **interp_kwargs)
             self.interpolations['s0']  = lambda r: nd.Cp*((np.log(self.interpolations['pom0'](r)) + self.interpolations['ln_rho0'](r))*(1/nd.gamma1) - self.interpolations['ln_rho0'](r))
         else:
             raise ValueError("Specified equation formulation {} not supported".format(config.numerics['equations']))
@@ -413,6 +414,46 @@ class ConvectionSimStarBuilder:
                         ylabel=ylabel, fig_name=ncc, out_dir=self.out_dir, log=log, ylim=ylim, \
                         r_int=self.r_bound_nd[1:-1], axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
         logger.info('We recommend looking at the plots in {}/ to make sure the non-constant coefficients look reasonable'.format(self.out_dir))
+
+        if config.numerics['equations'] == 'FC_HD':
+            #Make some plots of stratification, hydrostatic equilibrium, etc.
+            logger.info('Making final plots...')
+            plt.figure()
+            N2s = []
+            HSEs = []
+            rs = []
+            for bn in self.bases_keys:
+                rs.append(self.dedalus_r[bn].ravel())
+                grad_ln_rho0 = self.ncc_dict['grad_ln_rho0']['field_{}'.format(bn)]
+                pom0 = self.ncc_dict['pom0']['field_{}'.format(bn)]
+                gvec = self.ncc_dict['g']['field_{}'.format(bn)]
+                grad_s0 = self.ncc_dict['grad_s0']['field_{}'.format(bn)]
+                pom0 = self.ncc_dict['pom0']['field_{}'.format(bn)]
+                HSE = (nd.gamma1*pom0*(grad_ln_rho0 + grad_s0 / nd.Cp) - gvec).evaluate()
+                N2_val = -gvec['g'][2,:] * grad_s0['g'][2,:] / nd.Cp 
+                N2s.append(N2_val)
+                HSEs.append(HSE['g'][2,:])
+            r_dedalus = np.concatenate(rs, axis=-1)
+            N2_dedalus = np.concatenate(N2s, axis=-1).ravel()
+            HSE_dedalus = np.concatenate(HSEs, axis=-1).ravel()
+            plt.plot(r_nd, nd.tau_nd**2*structure.N2, c='k', label='MESA')
+            plt.plot(r_nd, -nd.tau_nd**2*structure.N2, c='k', ls='--')
+            plt.plot(r_dedalus, N2_dedalus, label='dedalus', c='g')
+            plt.plot(r_dedalus, -N2_dedalus, ls='--', c='g')
+            plt.legend()
+            plt.ylabel(r'$N^2$')
+            plt.xlabel('r')
+            plt.yscale('log')
+            plt.savefig('star/N2_goodness.png')
+
+            plt.figure()
+            plt.axhline(nd.s_motions/nd.Cp / nd.s_nd, c='k')
+            plt.plot(r_dedalus, np.abs(HSE_dedalus))
+            plt.yscale('log')
+            plt.xlabel('r')
+            plt.ylabel("HSE")
+            plt.savefig('star/HSE_goodness.png')
+
    
     def _define_cz_bounds(self):
         """ Abstract class; must set self.r_bounds. Also defines a boolean array self.cz_bool that is the size of the MESA grid """
@@ -450,6 +491,7 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         Also defines two boolean arrays: self.sim_bool and self.cz_bool that are the size of the MESA grid """
         structure = SimpleNamespace(**self.reader.structure)
         self.core_cz_radius = find_core_cz_radius(self.mesa_file_path, dimensionless=False)
+
         
         # Specify fraction of total star to simulate
         self.r_bounds = list(config.star['r_bounds'])
@@ -501,7 +543,10 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         self.nd['r_nd_coord']   = structure.r[structure.r==L_nd][0]/L_nd
         self.nd['m_nd']         = m_nd    = structure.rho[structure.r==L_nd][0] * L_nd**3 #mass at core cz boundary
         self.nd['T_nd']         = T_nd    = structure.T[structure.r==L_nd][0] #temp at core cz boundary
-        self.nd['tau_nd']       = tau_nd  = (1/f_brunt).cgs #timescale of max N^2
+        if config.star['cz_only']:
+            self.nd['tau_nd']       = tau_nd  = 1/np.sqrt(structure.cp[0]*T_nd / L_nd**2) #set based on central Cp -> tau_nd = 1/sqrt(Cp * T_nd / L_nd^2)
+        else:
+            self.nd['tau_nd']       = tau_nd  = (1/f_brunt).cgs #timescale of max N^2
         self.nd['rho_nd']       = rho_nd  = m_nd/L_nd**3
         self.nd['u_nd']         = u_nd    = L_nd/tau_nd
         self.nd['s_nd']         = s_nd    = L_nd**2 / tau_nd**2 / T_nd
@@ -517,7 +562,7 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         logger.info('Thermo: Cp/s_nd: {:.2e}, R_gas/s_nd: {:.2e}, gamma1: {:.4f}'.format(nondim_cp, nondim_R_gas, nondim_gamma1))
         logger.info('m_nd/M_\odot: {:.3f}'.format((m_nd/constants.M_sun).cgs))
         logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(Ma2_r0), tau_heat))
-        
+
         # Get some timestepping & wave frequency info
         self.nd['f_nyq'] = f_nyq = 2*tau_nd*np.sqrt(N2max_sim)/(2*np.pi)
         self.nd['nyq_dt'] = nyq_dt   = (1/f_nyq) 
@@ -568,6 +613,12 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
             L_conv_sim *= one_to_zero(structure.r, 0.95*self.core_cz_radius, width=0.05*self.core_cz_radius)
             L_conv_sim /= (structure.r/nd.L_nd)**2 * (4*np.pi)
             self.F_conv_func = interp1d(structure.r/nd.L_nd, L_conv_sim/nd.lum_nd, **interp_kwargs)
+        elif config.star['heat_only']:
+            #don't include radiative to put flux -> 0
+            raise NotImplementedError("must use smooth_h")
+        elif config.star['analytic_smooth_h']:
+            #Uses an analytic function to smoothly transition from convective to radiative
+            raise NotImplementedError("must use smooth_h")
         else:
             raise NotImplementedError("must use smooth_h")
     
@@ -578,20 +629,23 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         """
         structure = SimpleNamespace(**self.reader.structure)
         nd = SimpleNamespace(**self.nd)
-    
-        #Build a nice function for our basis in the ball
-        #have N^2 = A*r^2 + B; grad_N2 = 2 * A * r, so A = (grad_N2) / (2 * r_stitch) & B = stitch_value - A*r_stitch^2
-        stitch_point = self.bases['B'].radius
-        stitch_value = np.interp(stitch_point, structure.r/nd.L_nd, structure.N2)
-        grad_N2_stitch = np.gradient(structure.N2, structure.r)[structure.r/nd.L_nd < stitch_point][-1]
-        A = grad_N2_stitch / (2*self.bases['B'].radius * nd.L_nd)
-        B = stitch_value - A* (self.bases['B'].radius * nd.L_nd)**2
-        smooth_N2 = np.copy(structure.N2)
-        smooth_N2[structure.r/nd.L_nd < stitch_point] = A*(structure.r[structure.r/nd.L_nd < stitch_point])**2 + B
-        smooth_N2 *= zero_to_one(structure.r/nd.L_nd, self.grad_s_transition_point, width=self.grad_s_width)
 
-        # Solve for hydrostatic equilibrium for background
-        self.N2_func = interp1d(structure.r/nd.L_nd, nd.tau_nd**2 * smooth_N2, **interp_kwargs)
+        if config.star['cz_only']:
+            self.N2_func = lambda r: 0*r
+        else:
+            #Build a nice function for our basis in the ball
+            #have N^2 = A*r^2 + B; grad_N2 = 2 * A * r, so A = (grad_N2) / (2 * r_stitch) & B = stitch_value - A*r_stitch^2
+            stitch_point = self.bases['B'].radius
+            stitch_value = np.interp(stitch_point, structure.r/nd.L_nd, structure.N2)
+            grad_N2_stitch = np.gradient(structure.N2, structure.r)[structure.r/nd.L_nd < stitch_point][-1]
+            A = grad_N2_stitch / (2*self.bases['B'].radius * nd.L_nd)
+            B = stitch_value - A* (self.bases['B'].radius * nd.L_nd)**2
+            smooth_N2 = np.copy(structure.N2)
+            smooth_N2[structure.r/nd.L_nd < stitch_point] = A*(structure.r[structure.r/nd.L_nd < stitch_point])**2 + B
+            smooth_N2 *= zero_to_one(structure.r/nd.L_nd, self.grad_s_transition_point, width=self.grad_s_width)
+
+            # Solve for hydrostatic equilibrium for background
+            self.N2_func = interp1d(structure.r/nd.L_nd, nd.tau_nd**2 * smooth_N2, **interp_kwargs)
 
     def _construct_nccs(self):
         """ Constructs simulation NCCs using Dedalus and interpolations. """
@@ -604,7 +658,11 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
                 self.ncc_dict['grad_s0']['field_{}'.format(bn)]['g'] 
 
 def build_nccs(plot_nccs=True, grad_s_transition_default=0.03, reapply_grad_s_filter=False):
-    builder = MassiveCoreStarBuilder(plot=plot_nccs, grad_s_transition_default=grad_s_transition_default)
+    print(config.star['type'].lower())
+    if config.star['type'].lower() == 'massive':
+        builder = MassiveCoreStarBuilder(plot=plot_nccs, grad_s_transition_default=grad_s_transition_default)
+    else:
+        raise NotImplementedError("Can only simulate massive stars right now.")
 
 
 def build_nccs_old(plot_nccs=False, grad_s_transition_default=0.03, reapply_grad_s_filter=False):
