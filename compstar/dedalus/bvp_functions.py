@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 interp_kwargs = {'fill_value' : 'extrapolate', 'bounds_error' : False}
 
 def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stitch=[], r_outer=1, low_nr=16, \
-              R=1, gamma=5/3, nondim_radius=1, ncc_cutoff=1e-9, tolerance=1e-9, HSE_tolerance = 1e-4):
+              R=1, gamma=5/3, nondim_radius=1, ncc_cutoff=1e-9, tolerance=1e-9, HSE_tolerance = 1e-4, smooth_edge=True):
     """
     Solves for hydrostatic equilibrium in a calorically perfect ideal gas.
     The solution for density, entropy, and gravity is found given a specified function of N^2 and grad ln rho.
@@ -53,6 +53,8 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
         The tolerance for perturbation norm of the newton iteration.
     HSE_tolerance : float
         The tolerance for hydrostatic equilibrium of the BVP solve.
+    smooth_edge : bool
+        Whether to smooth the heating function from its value to zero at the boundary of the domain.
     
     Returns
     -------
@@ -108,7 +110,10 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
 
         #Make a field that smooths at the edge of the ball basis.
         namespace['edge_smoothing_{}'.format(k)] = edge_smooth = dist.Field(bases=basis, name='edge_smooth')
-        edge_smooth['g'] = one_to_zero(r, 0.95*bases['B'].radius, width=0.03*bases['B'].radius)
+        if smooth_edge:
+            edge_smooth['g'] = one_to_zero(r, 0.95*bases['B'].radius, width=0.03*bases['B'].radius)
+        else:
+            edge_smooth['g'] = 1
 
         # Get a high-resolution N^2 in the ball; low-resolution elsewhere where it transitions more gradually.
         namespace['N2_{}'.format(k)] = N2 = dist.Field(bases=basis, name='N2')
@@ -124,7 +129,8 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
 
         # Set the convective flux.
         namespace['Fconv_{}'.format(k)] = Fconv   = dist.VectorField(coords, name='Fconv', bases=basis)
-        Fconv['g'][2] = Fconv_func(r)
+        Fconv.change_scales(low_scales)
+        Fconv['g'][2] = Fconv_func(r_low)
 
         # Create important operations from the fields.
         namespace['ln_pomega_LHS_{}'.format(k)] = ln_pomega_LHS = gamma*(s/Cp + ((gamma-1)/gamma)*ln_rho*ones)

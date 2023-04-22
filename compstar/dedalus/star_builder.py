@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 interp_kwargs = {'fill_value' : 'extrapolate', 'bounds_error' : False}
 
 ### Function definitions
-def plot_ncc_figure(rvals, mesa_func, dedalus_vals, ylabel="", fig_name="", out_dir='.', 
+def plot_ncc_figure(rvals, mesa_func, dedalus_vals, target=None, ylabel="", fig_name="", out_dir='.', 
                     zero_line=False, log=False, r_int=None, ylim=None, axhline=None, Ns=None, ncc_cutoff=1e-6):
     """ 
     Plots a figure which compares a dedalus field and the MESA profile that the Dedalus field is based on. 
@@ -40,7 +40,8 @@ def plot_ncc_figure(rvals, mesa_func, dedalus_vals, ylabel="", fig_name="", out_
         A function which takes a radius and returns the corresponding MESA value
     dedalus_vals : list of arrays
         The dedalus field values
-    
+    target : function
+        A function of the interpolation function dedalus was trying to achieve
     ylabel : str
         The label for the y-axis
     fig_name : str
@@ -77,6 +78,8 @@ def plot_ncc_figure(rvals, mesa_func, dedalus_vals, ylabel="", fig_name="", out_
         if first:
             ax1.plot(r, mesa_y, label='mesa', c='k', lw=3)
             ax1.plot(r, y, label='dedalus', c='red')
+            if target is not None:
+                ax1.plot(r, target(r), label='target', c='blue', lw=0.5)
             first = False
         else:
             ax1.plot(r, mesa_y, c='k', lw=3)
@@ -262,9 +265,15 @@ class ConvectionSimStarBuilder:
         structure = SimpleNamespace(**self.reader.structure)
         r_nd = structure.r/nd.L_nd
         if config.numerics['equations'] == 'FC_HD':
+            if 'analytic_smooth_h' in config.star.keys() and config.star['analytic_smooth_h']:
+                smooth_edge = False
+            elif 'heat_only' in config.numerics.keys() and config.numerics['heat_only']:
+                smooth_edge = False
+            else:
+                smooth_edge = True
             atmo = HSE_solve(self.coords, self.dist, self.bases,  self.interpolations['grad_ln_rho0'], self.N2_func, self.F_conv_func,
                             r_outer=self.r_bound_nd[-1], r_stitch=self.r_bound_nd[1:-1], \
-                            R=self.nd['R'], gamma=self.nd['gamma1'], nondim_radius=self.nd['r_nd_coord'])
+                            R=self.nd['R'], gamma=self.nd['gamma1'], nondim_radius=self.nd['r_nd_coord'], smooth_edge=smooth_edge)
             self.sim_interpolations['ln_rho0']          = atmo['ln_rho']
             self.sim_interpolations['Q']                = atmo['Q']
             self.sim_interpolations['g']                = atmo['g']
@@ -334,6 +343,18 @@ class ConvectionSimStarBuilder:
                 self.ncc_dict['g']['mesa_interp_func'] = self.interpolations['g']
                 self.ncc_dict['g']['Nmax_{}'.format(bn)] = self.ncc_dict['neg_g']['Nmax_{}'.format(bn)]
                 self.ncc_dict['g']['from_grad'] = True 
+        
+        if 'heat_only' in config.star.keys() and not config.star['heat_only']:
+            #Fixup heating term to make simulation energy-neutral.       
+            integral = 0
+            for bn in self.bases.keys():
+                integral += d3.integ(self.ncc_dict['Q']['field_{}'.format(bn)])
+            C = integral.evaluate()['g']
+            vol = (4/3) * np.pi * (self.r_bound_nd[-1])**3
+            adj = C / vol
+            logger.info('adjusting dLdt for energy conservation; subtracting {} from H'.format(adj))
+            for bn in self.bases.keys():
+                self.ncc_dict['Q']['field_{}'.format(bn)]['g'] -= adj 
 
     def _save_star(self):
         """ Save NCC dictionary, nondimensionalization, and MESA profiles to a file """
@@ -402,6 +423,7 @@ class ConvectionSimStarBuilder:
                     dedalus_yvals.append(np.copy(self.ncc_dict[ncc]['field_{}'.format(bn)]['g'][0,0,:]))
             
             interp_func = self.ncc_dict[ncc]['mesa_interp_func']
+            target_func = self.ncc_dict[ncc]['interp_func']
             if config.numerics['equations'] == 'FC_HD':
                 if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad', 'nu_diff', 'mu_diff']:
                     log = True
@@ -410,14 +432,16 @@ class ConvectionSimStarBuilder:
         
                 if ncc in ['grad_T', 'grad_kappa_rad']:
                     this_interp_func = lambda r: -interp_func(r)
+                    this_target_func = lambda r: -target_func(r)
                     ylabel='-{}'.format(ncc)
                     for i in range(len(dedalus_yvals)):
                         dedalus_yvals[i] *= -1
                 else:
                     ylabel = ncc
                     this_interp_func = interp_func
+                    this_target_func = target_func
 
-            plot_ncc_figure(rvals, this_interp_func, dedalus_yvals, Ns=nvals, \
+            plot_ncc_figure(rvals, this_interp_func, dedalus_yvals, target=this_target_func, Ns=nvals, \
                         ylabel=ylabel, fig_name=ncc, out_dir=self.out_dir, log=log, ylim=ylim, \
                         r_int=self.r_bound_nd[1:-1], axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
         logger.info('We recommend looking at the plots in {}/ to make sure the non-constant coefficients look reasonable'.format(self.out_dir))
@@ -655,22 +679,28 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         """ defines a function self.F_conv_func which returns the convective flux at a given nondimensional simulation radius """
         structure = SimpleNamespace(**self.reader.structure)
         nd = SimpleNamespace(**self.nd)
+        L_conv_sim = np.copy(structure.L_conv)
         # Construct convective flux function which determines how convection is driven
-        if config.star['smooth_h']:
+        if 'smooth_h' in config.star.keys() and config.star['smooth_h']:
             #smooth CZ-RZ transition
-            L_conv_sim = np.copy(structure.L_conv)
+            # Note: erf reaches 99% of its nominal goal value at (5/3) times the erf width, and is zero to ~5e-4 at (7/3) times the erf width.
             L_conv_sim *= one_to_zero(structure.r, 0.9*self.core_cz_radius, width=0.05*self.core_cz_radius)
             L_conv_sim *= one_to_zero(structure.r, 0.95*self.core_cz_radius, width=0.05*self.core_cz_radius)
-            L_conv_sim /= (structure.r/nd.L_nd)**2 * (4*np.pi)
-            self.F_conv_func = interp1d(structure.r/nd.L_nd, L_conv_sim/nd.lum_nd, **interp_kwargs)
-        elif config.star['heat_only']:
-            #don't include radiative to put flux -> 0
-            raise NotImplementedError("must use smooth_h")
-        elif config.star['analytic_smooth_h']:
-            #Uses an analytic function to smoothly transition from convective to radiative
-            raise NotImplementedError("must use smooth_h")
+        elif 'heat_only' in config.star.keys() and config.star['heat_only']:
+            #don't include radiative to put flux -> 0; instead, from the max point outwards, just carry the max convective luminosity.
+            argmax = np.argmax(L_conv_sim)
+            L_conv_sim[argmax:] = L_conv_sim[argmax]
+        elif 'analytic_smooth_h' in config.star.keys() and  config.star['analytic_smooth_h']:
+            # smoothly transition from the max convective luminosity to 0 convective luminosity at r = 1 using a parabola.
+            argmax = np.argmax(L_conv_sim)
+            tot_transition_width = (self.core_cz_radius - structure.r[argmax]) 
+            L_conv_sim[argmax:] = L_conv_sim[argmax]*(1 - ((structure.r[argmax:] - structure.r[argmax])/tot_transition_width)**2)
+            self.nd['parabola_r_argmax'] = structure.r[argmax]/nd.L_nd
+            self.nd['parabola_r_width']  = tot_transition_width/nd.L_nd
         else:
-            raise NotImplementedError("must use smooth_h")
+            raise NotImplementedError("must use smooth_h, heat_only, or analytic_smooth_h")
+        L_conv_sim /= (structure.r/nd.L_nd)**2 * (4*np.pi)
+        self.F_conv_func = interp1d(structure.r/nd.L_nd, L_conv_sim/nd.lum_nd, **interp_kwargs)
     
     def _get_stability(self):
         """ 

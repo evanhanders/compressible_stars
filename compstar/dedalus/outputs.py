@@ -176,6 +176,7 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
     # Create Average and integral operations
     az_avg = lambda A: d3.Average(A, coords.coords[0])
     s2_avg = lambda A: d3.Average(A, coords.S2coordsys)
+    s2_std = lambda A: np.sqrt(s2_avg((A - s2_avg(A))**2))
 
     def integ(A):
         return d3.Integrate(A, coords)
@@ -185,9 +186,11 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
     
     solver.problem.namespace['az_avg'] = az_avg
     solver.problem.namespace['s2_avg'] = s2_avg
+    solver.problem.namespace['s2_std'] = s2_std
     solver.problem.namespace['integ'] = integ
     namespace['az_avg'] = solver.problem.namespace['az_avg']
     namespace['s2_avg'] = solver.problem.namespace['s2_avg']
+    namespace['s2_std'] = solver.problem.namespace['s2_std']
     namespace['integ'] = solver.problem.namespace['integ']
 
     for bn, basis in bases.items():
@@ -199,6 +202,8 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
 
         solver.problem.namespace['vol_avg_{}'.format(bn)] = functools.partial(vol_avg, volume=vol)
         namespace['vol_avg_{}'.format(bn)] = solver.problem.namespace['vol_avg_{}'.format(bn)]
+        solver.problem.namespace['s2_std_{}'.format(bn)] = lambda A: np.sqrt(s2_avg((A - namespace['ones_{}'.format(bn)]*s2_avg(A))**2))
+        namespace['s2_std_{}'.format(bn)] = solver.problem.namespace['s2_std_{}'.format(bn)]
 
     analysis_tasks = OrderedDict()
     even_analysis_tasks = EvenTaskDict(solver)
@@ -298,5 +303,13 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
                         task_str = 's2_avg({})'.format(fieldstr)
                         task = d3.Grid(eval(task_str, dict(solver.problem.namespace)))
                         handler.add_task(task, name='s2_avg({}_{})'.format(fieldname, bn))
+                elif this_task['type'] == 's2_std':
+                    for fieldname in this_task['fields']:
+                        fieldstr = output_tasks[fieldname].format(bn)
+                        task_str = 's2_std_{}({})'.format(bn, fieldstr)
+                        task = d3.Grid(eval(task_str, dict(solver.problem.namespace)))
+                        handler.add_task(task, name='s2_std_{}({}_{})'.format(bn, fieldname, bn))
+                else:
+                    raise NotImplementedError("Task type '{}' is not implemented.".format(this_task['type']))
 
     return analysis_tasks, even_analysis_tasks
