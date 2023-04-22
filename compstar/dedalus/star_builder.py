@@ -283,6 +283,7 @@ class ConvectionSimStarBuilder:
             self.sim_interpolations['pom0']             = atmo['pomega']
             self.sim_interpolations['grad_ln_pom0']     = atmo['grad_ln_pomega']
             self.sim_interpolations['L_heat']           = atmo['L_heat']
+            self.sim_interpolations['grad_T0_superad']  = lambda r: (atmo['pomega'](r)*atmo['grad_ln_pomega'](r)/nd.R) - (atmo['g'](r)/nd.Cp)
             self.sim_interpolations['nu_diff']          = interp1d(r_nd, structure.sim_nu_diff, **interp_kwargs) 
             self.sim_interpolations['chi_rad']          = interp1d(r_nd, structure.sim_rad_diff, **interp_kwargs)
             self.sim_interpolations['kappa_rad']        = interp1d(r_nd, np.exp(self.sim_interpolations['ln_rho0'](r_nd))*nd.Cp*structure.sim_rad_diff, **interp_kwargs)

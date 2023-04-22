@@ -53,7 +53,7 @@ class DimensionalMesaReader:
         self.structure['grad_s'] = grad_s                   = cp * grad_s_over_cp
         self.structure['L_conv'] = L_conv                   = conv_L_div_L*Luminosity
         self.structure['dTdr'] = dTdr                       = (T)*dlogTdr
-        self.structure['dTdr_superad'] = dTdr_superad       = dTdr - (-g/cp)
+        self.structure['dTdr_superad'] = dTdr_superad       = dTdr - (-g/cp) #TODO: Fix this; this is not generally true, is it?
 
         # Calculate k_rad and radiative diffusivity using luminosities and smooth things.
         self.structure['k_rad']    = k_rad    = rad_cond = -(Luminosity - L_conv)/(4*np.pi*r**2*dTdr)
