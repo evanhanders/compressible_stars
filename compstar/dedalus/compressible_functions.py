@@ -371,7 +371,7 @@ class SphericalCompressibleProblem():
                 self.namespace['visc_div_stress_L_{}'.format(bn)] = visc_div_stress_L = (mu_diff/rho0)*(d3.div(sigma) - sigma@grad_ln_rho0) + (1/rho0)*sigma@grad_mu_diff
                 self.namespace['visc_div_stress_L_RHS_{}'.format(bn)] = visc_div_stress_L_RHS = d3.Grid(grid_mu_diff*grid_inv_rho0)*(d3.div(sigma) - sigma_RHS@grid_grad_ln_rho0) + grid_inv_rho0*sigma_RHS@grid_grad_mu_diff
                 self.namespace['visc_div_stress_R_{}'.format(bn)] = visc_div_stress_R = (grid_inv_rho_full - grid_inv_rho0)*visc_div_stress_L_RHS + grid_mu_diff*grid_inv_rho_full*(sigma_RHS@grid_grad_ln_rho1)
-                self.namespace['VH_{}'.format(bn)] = VH = (grid_nu_diff)*(d3.trace(E_RHS@E_RHS) - (1/3)*grid_div_u**2)*2
+                self.namespace['VH_{}'.format(bn)] = VH = (grid_mu_diff*grid_inv_rho_full)*(d3.trace(E_RHS@E_RHS) - (1/3)*grid_div_u**2)*2
 
             #Linear Pomega = R * T
             self.namespace['pom1_over_pom0_{}'.format(bn)] = pom1_over_pom0 = gamma*(s1/Cp + ((gamma-1)/gamma)*ln_rho1)
