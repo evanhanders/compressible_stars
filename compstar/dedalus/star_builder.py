@@ -240,7 +240,9 @@ class ConvectionSimStarBuilder:
             self.interpolations['nu_diff'] = interp1d(r_nd, structure.nu_diff*(nd.tau_nd/nd.L_nd**2), **interp_kwargs)
             self.interpolations['chi_rad'] = interp1d(r_nd, structure.rad_diff*(nd.tau_nd/nd.L_nd**2), **interp_kwargs)
             self.interpolations['kappa_rad'] = lambda r: self.interpolations['chi_rad'](r)*np.exp(self.interpolations['ln_rho0'](r))*nd.Cp
+            self.interpolations['mu_diff']   = lambda r: self.interpolations['nu_diff'](r)*np.exp(self.interpolations['ln_rho0'](r))
             self.interpolations['grad_kappa_rad'] = interp1d(r_nd, np.gradient(self.interpolations['kappa_rad'](r_nd), r_nd), **interp_kwargs)
+            self.interpolations['grad_mu_diff']   = interp1d(r_nd, np.gradient(self.interpolations['mu_diff'](r_nd), r_nd), **interp_kwargs)
             self.interpolations['g'] = interp1d(r_nd, -structure.g * (nd.tau_nd**2/nd.L_nd), **interp_kwargs)
             self.interpolations['g_phi'] = interp1d(r_nd, structure.g_phi * (nd.tau_nd**2 / nd.L_nd**2), **interp_kwargs)
             self.interpolations['Q'] = interp1d(r_nd, np.gradient(structure.L_conv/nd.lum_nd, r_nd)/(4*np.pi*r_nd**2), **interp_kwargs)
@@ -276,6 +278,8 @@ class ConvectionSimStarBuilder:
             self.sim_interpolations['chi_rad']          = interp1d(r_nd, structure.sim_rad_diff, **interp_kwargs)
             self.sim_interpolations['kappa_rad']        = interp1d(r_nd, np.exp(self.sim_interpolations['ln_rho0'](r_nd))*nd.Cp*structure.sim_rad_diff, **interp_kwargs)
             self.sim_interpolations['grad_kappa_rad']   = interp1d(r_nd, np.gradient(self.sim_interpolations['kappa_rad'](r_nd), r_nd), **interp_kwargs)
+            self.sim_interpolations['mu_diff']          = interp1d(r_nd, np.exp(self.sim_interpolations['ln_rho0'](r_nd))*structure.sim_nu_diff, **interp_kwargs)
+            self.sim_interpolations['grad_mu_diff']     = interp1d(r_nd, np.gradient(self.sim_interpolations['mu_diff'](r_nd), r_nd), **interp_kwargs)
         else:
             raise ValueError("Specified equation formulation {} not supported".format(config.numerics['equations']))
 
@@ -399,7 +403,7 @@ class ConvectionSimStarBuilder:
             
             interp_func = self.ncc_dict[ncc]['mesa_interp_func']
             if config.numerics['equations'] == 'FC_HD':
-                if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad', 'nu_diff']:
+                if ncc in ['T', 'grad_T', 'chi_rad', 'grad_chi_rad', 'grad_s0', 'kappa_rad', 'grad_kappa_rad', 'nu_diff', 'mu_diff']:
                     log = True
                 if ncc == 'grad_s0': 
                     axhline = (nd.s_motions / nd.s_nd)
@@ -462,10 +466,78 @@ class ConvectionSimStarBuilder:
         """ Abstract class; must set self.r_bounds. Also defines a boolean array self.cz_bool that is the size of the MESA grid """
         pass
 
-    def _nondimensionalize(self):
-        """ Creates and fills the dictionary self.nd which contains scalar quantities used for nondimensionalization with astropy units.
-         Also defines self.r_bounds_nd, which is the nondimensionalized radius bounds of the simulation bases. """
-        pass
+    def _nondimensionalize(self, L_nd, T_nd, m_nd, tau_nd, mesa_index):
+        """ 
+        Creates and fills the dictionary self.nd which contains scalar quantities used for nondimensionalization with astropy units.
+        Also defines self.r_bounds_nd, which is the nondimensionalized radius bounds of the simulation bases. 
+
+        Parameters
+        ----------
+        L_nd : float
+            Length scale for nondimensionalization
+        T_nd : float
+            Temperature scale for nondimensionalization
+        m_nd : float
+            Mass scale for nondimensionalization
+        tau_nd : float
+            Time scale for nondimensionalization
+        mesa_index : int
+            Index of the MESA grid point to use for nondimensionalization  
+        """
+        structure = SimpleNamespace(**self.reader.structure)
+        self.nd = OrderedDict()
+
+        # Set nondimensionalization
+        self.nd['L_nd'] = self.nd['L_CZ'] = L_nd
+        self.nd['T_nd'] = T_nd
+        self.nd['m_nd'] = m_nd
+        self.nd['tau_nd'] = tau_nd
+        self.nd['r_nd_coord']   = structure.r[mesa_index] / L_nd
+        self.nd['rho_nd']       = rho_nd  = m_nd/L_nd**3
+        self.nd['u_nd']         = u_nd    = L_nd/tau_nd
+        self.nd['s_nd']         = s_nd    = L_nd**2 / tau_nd**2 / T_nd
+        self.nd['H_nd']         = H_nd    = (m_nd / L_nd) * tau_nd**-3
+        self.nd['lum_nd']       = lum_nd  = L_nd**2 * m_nd / (tau_nd**2) / tau_nd
+        self.nd['H0']           = H0  = np.max((structure.rho*structure.eps_nuc)[self.cz_bool])
+        self.nd['tau_heat']     = tau_heat  = ((H0*L_nd/m_nd)**(-1/3)).cgs 
+        self.nd['s_motions']    = s_motions    = L_nd**2 / tau_heat**2 / structure.T[mesa_index]
+        logger.info('Nondimensionalization: L_nd = {:.2e}, T_nd = {:.2e}, m_nd = {:.2e}, tau_nd = {:.2e}'.format(L_nd, T_nd, m_nd, tau_nd))
+        logger.info('m_nd/M_\odot: {:.3f}'.format((m_nd/constants.M_sun).cgs))
+
+        # Get some rough MLT values.
+        mlt_u = ((structure.Luminosity / (4 * np.pi * structure.r**2 * structure.rho) )**(1/3)).cgs
+        vol_cz = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r))[self.cz_bool]).cgs
+        self.nd['avg_cz_u'] = avg_cz_u = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r)*mlt_u)[self.cz_bool]) / vol_cz
+        self.nd['avg_cz_ma'] = avg_cz_ma = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r)*mlt_u/structure.csound)[self.cz_bool]) / vol_cz
+        logger.info('avg cz velocity: {:.3e} / ma: {:.3e}'.format(avg_cz_u, avg_cz_ma))
+
+        #Get N2 info
+        self.nd['N2max_sim']    = N2max_sim = structure.N2[self.sim_bool].max()
+        self.nd['f_brunt']      = f_brunt = np.sqrt(N2max_sim)/(2*np.pi)
+    
+        #Thermodynamics
+        if config.numerics['equations'] == 'FC_HD':
+            self.nd['R']            = nondim_R_gas = (constants.R.cgs / structure.mu[mesa_index] / s_nd).cgs.value
+            self.nd['gamma1']       = nondim_gamma1 = (structure.gamma1[mesa_index]).value
+            self.nd['Cp']           = nondim_cp = nondim_R_gas * nondim_gamma1 / (nondim_gamma1 - 1)
+            self.nd['Ma2_r0']       = Ma2_r0 = ((u_nd*(tau_nd/tau_heat))**2 / ((nondim_gamma1-1)*nondim_cp*T_nd)).cgs
+            logger.info('Thermo: Cp/s_nd: {:.2e}, R_gas/s_nd: {:.2e}, gamma1: {:.4f}'.format(nondim_cp, nondim_R_gas, nondim_gamma1))
+            logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(Ma2_r0), tau_heat))
+        else:
+            raise NotImplementedError('Nondimensionalization not implemented for this equation set')
+
+        # Get some timestepping & wave frequency info
+        self.nd['f_nyq']         = f_nyq = 2*tau_nd*np.sqrt(N2max_sim)/(2*np.pi)
+        self.nd['nyq_dt']        = nyq_dt   = (1/f_nyq) 
+        self.nd['kepler_tau']    = kepler_tau     = 30*60*u.s
+        self.nd['max_dt_kepler'] = max_dt_kepler  = kepler_tau/tau_nd
+        self.nd['max_dt']        = 0.05*tau_heat/tau_nd
+        logger.info('needed nyq_dt is {} s or {} % of a nondimensional time (Kepler 30 min is {} %) '.format(nyq_dt*tau_nd, nyq_dt*100, max_dt_kepler*100))
+        logger.info('max_dt is {} s or {} nondimensional time units (Kepler 30 min is {}) '.format(self.nd['max_dt']*tau_nd, self.nd['max_dt'], max_dt_kepler))
+        
+        #MESA radial values at simulation joints & across full star in simulation units
+        self.r_bound_nd = [(rb/L_nd).value for rb in self.r_bounds]
+        self.r_nd = (structure.r/L_nd).cgs
     
     def _construct_diffusivities(self):
         """ Define the diffusivities to use in the simulation. Adds the following keys to self.reader.structure: 'sim_nu_diff', 'sim_rad_diff'"""
@@ -494,7 +566,6 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         Also defines two boolean arrays: self.sim_bool and self.cz_bool that are the size of the MESA grid """
         structure = SimpleNamespace(**self.reader.structure)
         self.core_cz_radius = find_core_cz_radius(self.mesa_file_path, dimensionless=False)
-
         
         # Specify fraction of total star to simulate
         self.r_bounds = list(config.star['r_bounds'])
@@ -520,66 +591,29 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         logger.info('fraction of stellar mass simulated: {:.7f}'.format(structure.mass[self.sim_bool][-1]/structure.mass[-1]))
 
     def _nondimensionalize(self):
-        """ Creates and fills the dictionary self.nd which contains scalar quantities used for nondimensionalization with astropy units. """
+        """ Nondimensionalize at the outer boundary of the core convection zone. """
         structure = SimpleNamespace(**self.reader.structure)
-        self.nd = OrderedDict()
+        L_nd = self.core_cz_radius
+        mesa_index = np.where(structure.r == L_nd)[0][0]
+        m_nd = structure.rho[mesa_index] * L_nd**3
+        T_nd = structure.T[mesa_index]
+        if config.star['cz_only']:
+            #set based on Cp; can form a timescale from 1/sqrt(Cp * T_nd / L_nd^2)
+            tau_nd  = 1/np.sqrt(structure.cp[mesa_index] * T_nd / L_nd**2).cgs
+        else:
+            #set based on max N^2
+            f_brunt = np.sqrt(structure.N2[self.sim_bool].max())/(2*np.pi)
+            tau_nd  = (1/f_brunt).cgs
 
-        # Get some rough MLT values.
-        mlt_u = ((structure.Luminosity / (4 * np.pi * structure.r**2 * structure.rho) )**(1/3)).cgs
-        self.nd['avg_core_u'] = avg_core_u = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r)*mlt_u)[structure.r < self.core_cz_radius]) / (4*np.pi*self.core_cz_radius**3 / 3)
-        self.nd['avg_core_ma'] = avg_core_ma = np.sum((4*np.pi*structure.r**2*np.gradient(structure.r)*mlt_u/structure.csound)[structure.r < self.core_cz_radius]) / (4*np.pi*self.core_cz_radius**3 / 3)
-        logger.info('avg core velocity: {:.3e} / ma: {:.3e}'.format(avg_core_u, avg_core_ma))
-
-        #Get N2 info
-        self.nd['N2max_sim']    = N2max_sim = structure.N2[self.sim_bool].max()
+        super()._nondimensionalize(L_nd, T_nd, m_nd, tau_nd, mesa_index)
+        nd = SimpleNamespace(**self.nd)
+        
+        #Get 'plateau' N2 value, which is median N2 over 50% of the shell by radius
         shell_points = np.sum(self.sim_bool*(structure.r > self.core_cz_radius))
         self.nd['N2plateau']    = N2plateau = np.median(structure.N2[structure.r > self.core_cz_radius][int(shell_points*0.25):int(shell_points*0.75)])
-        self.nd['f_brunt']      = f_brunt = np.sqrt(N2max_sim)/(2*np.pi)
     
-        #Nondimensionalization
-        self.nd['L_CZ']         = L_CZ    = self.core_cz_radius
-        self.nd['m_core']       = m_core  = structure.rho[0] * L_CZ**3
-        self.nd['T_core']       = T_core  = structure.T[0]
-        self.nd['H0']           = H0  = (structure.rho*structure.eps_nuc)[0]
-        self.nd['tau_heat']     = tau_heat  = ((H0*L_CZ/m_core)**(-1/3)).cgs #heating timescale
-        self.nd['L_nd']         = L_nd    = L_CZ
-        self.nd['r_nd_coord']   = structure.r[structure.r==L_nd][0]/L_nd
-        self.nd['m_nd']         = m_nd    = structure.rho[structure.r==L_nd][0] * L_nd**3 #mass at core cz boundary
-        self.nd['T_nd']         = T_nd    = structure.T[structure.r==L_nd][0] #temp at core cz boundary
-        if config.star['cz_only']:
-            self.nd['tau_nd']       = tau_nd  = 1/np.sqrt(structure.cp[0]*T_nd / L_nd**2) #set based on central Cp -> tau_nd = 1/sqrt(Cp * T_nd / L_nd^2)
-        else:
-            self.nd['tau_nd']       = tau_nd  = (1/f_brunt).cgs #timescale of max N^2
-        self.nd['rho_nd']       = rho_nd  = m_nd/L_nd**3
-        self.nd['u_nd']         = u_nd    = L_nd/tau_nd
-        self.nd['s_nd']         = s_nd    = L_nd**2 / tau_nd**2 / T_nd
-        self.nd['H_nd']         = H_nd    = (m_nd / L_nd) * tau_nd**-3
-        self.nd['s_motions']    = s_motions    = L_nd**2 / tau_heat**2 / structure.T[0]
-        self.nd['lum_nd']       = lum_nd  = L_nd**2 * m_nd / (tau_nd**2) / tau_nd
-        self.nd['R']            = nondim_R_gas = (constants.R.cgs / structure.mu[0] / s_nd).cgs.value
-        self.nd['gamma1']       = nondim_gamma1 = (structure.gamma1[0]).value
-        self.nd['Cp']           = nondim_cp = nondim_R_gas * nondim_gamma1 / (nondim_gamma1 - 1)
-        self.nd['u_heat_nd']    = u_heat_nd = (L_nd/tau_heat) / u_nd
-        self.nd['Ma2_r0']       = Ma2_r0 = ((u_nd*(tau_nd/tau_heat))**2 / ((structure.gamma1[0]-1)*structure.cp[0]*structure.T[0])).cgs
-        logger.info('Nondimensionalization: L_nd = {:.2e}, T_nd = {:.2e}, m_nd = {:.2e}, tau_nd = {:.2e}'.format(L_nd, T_nd, m_nd, tau_nd))
-        logger.info('Thermo: Cp/s_nd: {:.2e}, R_gas/s_nd: {:.2e}, gamma1: {:.4f}'.format(nondim_cp, nondim_R_gas, nondim_gamma1))
-        logger.info('m_nd/M_\odot: {:.3f}'.format((m_nd/constants.M_sun).cgs))
-        logger.info('estimated mach number: {:.3e} / t_heat: {:.3e}'.format(np.sqrt(Ma2_r0), tau_heat))
-
-        # Get some timestepping & wave frequency info
-        self.nd['f_nyq'] = f_nyq = 2*tau_nd*np.sqrt(N2max_sim)/(2*np.pi)
-        self.nd['nyq_dt'] = nyq_dt   = (1/f_nyq) 
-        self.nd['kepler_tau'] = kepler_tau     = 30*60*u.s
-        self.nd['max_dt_kepler'] = max_dt_kepler  = kepler_tau/tau_nd
-        self.nd['max_dt'] = max_dt_kepler
-        logger.info('needed nyq_dt is {} s / {} % of a nondimensional time (Kepler 30 min is {} %) '.format(nyq_dt*tau_nd, nyq_dt*100, max_dt_kepler*100))
-        
-        #MESA radial values at simulation joints & across full star in simulation units
-        self.r_bound_nd = [(rb/L_nd).value for rb in self.r_bounds]
-        self.r_nd = (structure.r/L_nd).cgs
-
+        #Set up constants for constructing transition from CZ to RZ
         self.grad_s_width = self.grad_s_transition_default
-        self.grad_s_width *= (L_CZ/L_nd).value
         self.grad_s_transition_point = self.r_bound_nd[1] - self.grad_s_width
         logger.info('using grad s transition point = {}'.format(self.grad_s_transition_point))
         logger.info('using grad s width = {}'.format(self.grad_s_width))
@@ -592,17 +626,30 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         r_nd = structure.r/nd.L_nd
         self.interpolations['g_phi'] = interp1d(r_nd, (structure.g_phi - structure.g_phi[r_nd > self.r_bound_nd[-1]][0])* (nd.tau_nd**2 / nd.L_nd**2) , **interp_kwargs)
 
-    def _construct_diffusivities(self):
+    def _construct_diffusivities(self, constant_diffusivities=False, constant_dynamic_diffusivities=False):
         """ Define the diffusivities to use in the simulation. Adds the following keys to self.reader.structure: 'sim_nu_diff', 'sim_rad_diff'"""
-        #construct diffusivity profiles which will be used in simulation.
         structure = SimpleNamespace(**self.reader.structure)
         nd = SimpleNamespace(**self.nd)
-        rad_diff_nd = structure.rad_diff * (nd.tau_nd / nd.L_nd**2)
         self.nd['rad_diff_cutoff'] = rad_diff_cutoff = (1/(config.numerics['prandtl']*config.numerics['reynolds_target'])) * ((nd.L_CZ**2/nd.tau_heat) / (nd.L_nd**2/nd.tau_nd))
-        self.reader.structure['sim_rad_diff'] = sim_rad_diff = np.copy(rad_diff_nd) + rad_diff_cutoff
-        self.reader.structure['sim_nu_diff'] = sim_nu_diff = config.numerics['prandtl']*rad_diff_cutoff*np.ones_like(sim_rad_diff)
-        logger.info('rad_diff cutoff: {:.3e}'.format(rad_diff_cutoff))
-        logger.info('rad_diff cutoff (dimensional): {:.3e}'.format(rad_diff_cutoff * (nd.L_nd**2/nd.tau_nd)))
+        if 'constant_diffusivities' in config.numerics.keys() and config.numerics['constant_diffusivities']:
+            # Thermal Diffusivity is constant everywhere, except where true radiative diffusion in the star > that constant.
+            # Viscous Diffusion is constant everywehere.
+            rad_diff_nd = structure.rad_diff * (nd.tau_nd / nd.L_nd**2)
+            self.reader.structure['sim_rad_diff'] = sim_rad_diff = np.copy(rad_diff_nd) + rad_diff_cutoff
+            self.reader.structure['sim_nu_diff'] = sim_nu_diff = config.numerics['prandtl']*rad_diff_cutoff*np.ones_like(sim_rad_diff)
+            logger.info('rad_diff cutoff: {:.3e}'.format(rad_diff_cutoff))
+            logger.info('rad_diff cutoff (dimensional): {:.3e}'.format(rad_diff_cutoff * (nd.L_nd**2/nd.tau_nd)))
+        elif 'constant_dynamic_diffusivities' in config.numerics.keys() and config.numerics['constant_dynamic_diffusivities']:
+            # Dynamic diffusivities (radiative conductivity = rho * cp * chi and dynamic viscosity = rho * nu) are constant; set at base of CZ.
+            k_rad = rad_diff_cutoff * (structure.rho[0]/nd.rho_nd) * (structure.cp[0]/nd.s_nd)
+            Pr = config.numerics['prandtl'] #nu / chi = (mu/rho) / (k/rho/cp) = mu * cp / k
+            mu = Pr * k_rad / (structure.cp[0]/nd.s_nd)
+            self.reader.structure['sim_rad_diff'] = sim_rad_diff = k_rad / (structure.rho/nd.rho_nd) / nd.Cp
+            self.reader.structure['sim_nu_diff'] = sim_nu_diff = mu / (structure.rho/nd.rho_nd)
+            logger.info('Simulation Pr: {:.3e}, mu: {:.3e}, k_rad: {:.3e}'.format(Pr, mu, k_rad))
+        else:
+            raise NotImplementedError('Must specify constant_diffusivities=True or constant_dynamic_diffusivities=True')
+
     
     def _get_Fconv(self):
         """ defines a function self.F_conv_func which returns the convective flux at a given nondimensional simulation radius """
@@ -636,19 +683,22 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         if config.star['cz_only']:
             self.N2_func = lambda r: 0*r
         else:
-            #Build a nice function for our basis in the ball
-            #have N^2 = A*r^2 + B; grad_N2 = 2 * A * r, so A = (grad_N2) / (2 * r_stitch) & B = stitch_value - A*r_stitch^2
-            stitch_point = self.bases['B'].radius
-            stitch_value = np.interp(stitch_point, structure.r/nd.L_nd, structure.N2)
-            grad_N2_stitch = np.gradient(structure.N2, structure.r)[structure.r/nd.L_nd < stitch_point][-1]
-            A = grad_N2_stitch / (2*self.bases['B'].radius * nd.L_nd)
-            B = stitch_value - A* (self.bases['B'].radius * nd.L_nd)**2
-            smooth_N2 = np.copy(structure.N2)
-            smooth_N2[structure.r/nd.L_nd < stitch_point] = A*(structure.r[structure.r/nd.L_nd < stitch_point])**2 + B
-            smooth_N2 *= zero_to_one(structure.r/nd.L_nd, self.grad_s_transition_point, width=self.grad_s_width)
+            if config.numerics['equations'] == 'FC_HD':
+                #Build a nice function for our basis in the ball
+                #have N^2 = A*r^2 + B; grad_N2 = 2 * A * r, so A = (grad_N2) / (2 * r_stitch) & B = stitch_value - A*r_stitch^2
+                stitch_point = self.bases['B'].radius
+                stitch_value = np.interp(stitch_point, structure.r/nd.L_nd, structure.N2)
+                grad_N2_stitch = np.gradient(structure.N2, structure.r)[structure.r/nd.L_nd < stitch_point][-1]
+                A = grad_N2_stitch / (2*self.bases['B'].radius * nd.L_nd)
+                B = stitch_value - A* (self.bases['B'].radius * nd.L_nd)**2
+                smooth_N2 = np.copy(structure.N2)
+                smooth_N2[structure.r/nd.L_nd < stitch_point] = A*(structure.r[structure.r/nd.L_nd < stitch_point])**2 + B
+                smooth_N2 *= zero_to_one(structure.r/nd.L_nd, self.grad_s_transition_point, width=self.grad_s_width)
 
-            # Solve for hydrostatic equilibrium for background
-            self.N2_func = interp1d(structure.r/nd.L_nd, nd.tau_nd**2 * smooth_N2, **interp_kwargs)
+                # Solve for hydrostatic equilibrium for background
+                self.N2_func = interp1d(structure.r/nd.L_nd, nd.tau_nd**2 * smooth_N2, **interp_kwargs)
+            else:
+                raise NotImplementedError("must use FC_HD")
 
     def _construct_nccs(self):
         """ Constructs simulation NCCs using Dedalus and interpolations. """
@@ -659,6 +709,7 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
                 self.ncc_dict['grad_s0']['field_{}'.format(bn)]['g'] *= zero_to_one(self.dedalus_r[bn], self.grad_s_transition_point-5*self.grad_s_width, width=self.grad_s_width)
                 self.ncc_dict['grad_s0']['field_{}'.format(bn)]['c'] *= 1
                 self.ncc_dict['grad_s0']['field_{}'.format(bn)]['g'] 
+
 
 def build_nccs(plot_nccs=True, grad_s_transition_default=0.03, reapply_grad_s_filter=False):
     print(config.star['type'].lower())

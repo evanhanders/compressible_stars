@@ -89,8 +89,8 @@ class SphericalCompressibleProblem():
         self.scalar_fields = ['ln_rho1', 's1', 'Q', 'ones'] 
         self.vec_taus = ['tau_u']
         self.scalar_taus =  ['tau_s']
-        self.vec_nccs = ['grad_pom0', 'grad_ln_pom0', 'grad_ln_rho0', 'grad_s0', 'g', 'rvec', 'grad_nu_diff', 'grad_chi_rad', 'grad_kappa_rad', 'grad_T0_superad', 'L_heat']
-        self.scalar_nccs = ['pom0', 'rho0', 'ln_rho0', 'g_phi', 'nu_diff', 'kappa_rad', 'chi_rad', 's0', 'inv_pom0']
+        self.vec_nccs = ['grad_pom0', 'grad_ln_pom0', 'grad_ln_rho0', 'grad_s0', 'g', 'rvec', 'grad_nu_diff', 'grad_mu_diff', 'grad_chi_rad', 'grad_kappa_rad', 'grad_T0_superad', 'L_heat']
+        self.scalar_nccs = ['pom0', 'rho0', 'ln_rho0', 'g_phi', 'nu_diff', 'mu_diff', 'kappa_rad', 'chi_rad', 's0', 'inv_pom0']
         self.sphere_unit_vectors = ['ephi', 'etheta', 'er']
         self.cartesian_unit_vectors = ['ex', 'ey', 'ez']
 
@@ -236,8 +236,14 @@ class SphericalCompressibleProblem():
             grad_s0 = self.namespace['grad_s0_{}'.format(bn)]
             g_phi = self.namespace['g_phi_{}'.format(bn)]
             gravity = self.namespace['g_{}'.format(bn)]
-            nu_diff = self.namespace['nu_diff_{}'.format(bn)]
-            grad_nu_diff = self.namespace['grad_nu_diff_{}'.format(bn)]
+            if 'constant_diffusivities' in config.numerics.keys() and config.numerics['constant_diffusivities']:
+                nu_diff = self.namespace['nu_diff_{}'.format(bn)]
+                grad_nu_diff = self.namespace['grad_nu_diff_{}'.format(bn)]
+            elif 'constant_dynamic_diffusivities' in config.numerics.keys() and config.numerics['constant_dynamic_diffusivities']:
+                mu_diff = self.namespace['mu_diff_{}'.format(bn)]
+                grad_mu_diff = self.namespace['grad_mu_diff_{}'.format(bn)]
+                nu_diff = mu_diff/rho0
+                grad_nu_diff = grad_mu_diff/rho0 - mu_diff*grad_ln_rho0/rho0
             chi_rad = self.namespace['chi_rad_{}'.format(bn)]
             grad_chi_rad = self.namespace['grad_chi_rad_{}'.format(bn)]
             kappa_rad = self.namespace['kappa_rad_{}'.format(bn)]
@@ -303,7 +309,12 @@ class SphericalCompressibleProblem():
             self.namespace['grid_kappa_rad_{}'.format(bn)] = grid_kappa_rad = d3.Grid(kappa_rad*ones).evaluate()
             self.namespace['grid_grad_kappa_rad_{}'.format(bn)] = grid_grad_kappa_rad = d3.Grid(ones*grad_kappa_rad).evaluate()
             self.namespace['grid_inv_pom0_{}'.format(bn)] = grid_inv_pom0 = d3.Grid(inv_pom0).evaluate()
+            self.namespace['grid_inv_rho0_{}'.format(bn)] = grid_inv_rho0 = d3.Grid(ones/rho0).evaluate()
             self.namespace['grid_nu_diff_{}'.format(bn)] = grid_nu_diff = d3.Grid(nu_diff).evaluate()
+            if 'constant_dynamic_diffusivities' in config.numerics.keys() and config.numerics['constant_dynamic_diffusivities']:
+                self.namespace['grid_mu_diff_{}'.format(bn)] = grid_mu_diff = d3.Grid(mu_diff).evaluate()
+                self.namespace['grid_grad_mu_diff_{}'.format(bn)] = grid_grad_mu_diff = d3.Grid(grad_mu_diff).evaluate()
+            self.namespace['grid_grad_nu_diff_{}'.format(bn)] = grid_grad_nu_diff = d3.Grid(grad_nu_diff).evaluate()
             self.namespace['grid_neg_one_{}'.format(bn)] = neg_one = d3.Grid(-ones).evaluate()
             self.namespace['grid_eye_{}'.format(bn)] = grid_eye = d3.Grid(eye).evaluate()
             self.namespace['grid_P0_{}'.format(bn)] = grid_P0 = d3.Grid(P0*ones).evaluate()
@@ -333,18 +344,9 @@ class SphericalCompressibleProblem():
             lap_domain = d3.lap(s1).domain
             self.namespace['lap_C_{}'.format(bn)] = lap_C = lambda A: convert(A, lap_domain.bases)
 
-            #Stress matrices & viscous terms
-            self.namespace['E_{}'.format(bn)] = E = grad_u/2 + d3.trans(grad_u/2)
-            self.namespace['sigma_{}'.format(bn)] = sigma = (E - div_u*eye/3)*2
-            self.namespace['E_RHS_{}'.format(bn)] = E_RHS = (grid_grad_u + d3.trans(grid_grad_u))/2
-            self.namespace['sigma_RHS_{}'.format(bn)] = sigma_RHS = (E_RHS - grid_div_u*grid_eye/3)*2
-            self.namespace['visc_div_stress_L_{}'.format(bn)] = visc_div_stress_L = nu_diff*(d3.div(sigma) + sigma@grad_ln_rho0) + sigma@grad_nu_diff
-            self.namespace['visc_div_stress_L_RHS_{}'.format(bn)] = visc_div_stress_L_RHS = grid_nu_diff*(d3.div(sigma) + sigma_RHS@grid_grad_ln_rho0) + sigma_RHS@d3.Grid(grad_nu_diff)
-            self.namespace['visc_div_stress_R_{}'.format(bn)] = visc_div_stress_R = grid_nu_diff*(sigma_RHS@grid_grad_ln_rho1)
-            self.namespace['VH_{}'.format(bn)] = VH = (grid_nu_diff)*(d3.trace(E_RHS@E_RHS) - (1/3)*grid_div_u**2)*2
-
             #Thermodynamics: rho, pressure, s 
             self.namespace['rho_full_{}'.format(bn)] = rho_full = grid_rho0*np.exp(ln_rho1)
+            grid_inv_rho_full = d3.Grid(1/rho_full).evaluate()
             self.namespace['rho_fluc_{}'.format(bn)] = rho_fluc = rho_full - grid_rho0
             self.namespace['ln_rho_full_{}'.format(bn)] = ln_rho_full = (grid_ln_rho0 + ln_rho1)
             self.namespace['grad_ln_rho_full_{}'.format(bn)] = grad_ln_rho_full = grid_grad_ln_rho0 + grid_grad_ln_rho1
@@ -353,6 +355,23 @@ class SphericalCompressibleProblem():
             self.namespace['grad_s_full_{}'.format(bn)] = grad_s_full = grid_grad_s0 + grid_grad_s1
             self.namespace['enthalpy_{}'.format(bn)] = enthalpy = grid_cp_div_R*P_full
             self.namespace['enthalpy_fluc_{}'.format(bn)] = enthalpy_fluc = enthalpy - d3.Grid(grid_cp_div_R*grid_P0)
+
+            #Stress matrices & viscous terms
+            self.namespace['E_{}'.format(bn)] = E = grad_u/2 + d3.trans(grad_u/2)
+            self.namespace['sigma_{}'.format(bn)] = sigma = (E - div_u*eye/3)*2
+            self.namespace['E_RHS_{}'.format(bn)] = E_RHS = (grid_grad_u + d3.trans(grid_grad_u))/2
+            self.namespace['sigma_RHS_{}'.format(bn)] = sigma_RHS = (E_RHS - grid_div_u*grid_eye/3)*2
+
+            if 'constant_diffusivities' in config.numerics.keys() and config.numerics['constant_diffusivities']:
+                self.namespace['visc_div_stress_L_{}'.format(bn)] = visc_div_stress_L = nu_diff*(d3.div(sigma) + sigma@grad_ln_rho0) + sigma@grad_nu_diff
+                self.namespace['visc_div_stress_L_RHS_{}'.format(bn)] = visc_div_stress_L_RHS = grid_nu_diff*(d3.div(sigma) + sigma_RHS@grid_grad_ln_rho0) + sigma_RHS@d3.Grid(grad_nu_diff)
+                self.namespace['visc_div_stress_R_{}'.format(bn)] = visc_div_stress_R = grid_nu_diff*(sigma_RHS@grid_grad_ln_rho1)
+                self.namespace['VH_{}'.format(bn)] = VH = (grid_nu_diff)*(d3.trace(E_RHS@E_RHS) - (1/3)*grid_div_u**2)*2
+            elif 'constant_dynamic_diffusivities' in config.numerics.keys() and config.numerics['constant_dynamic_diffusivities']:
+                self.namespace['visc_div_stress_L_{}'.format(bn)] = visc_div_stress_L = (mu_diff/rho0)*(d3.div(sigma) - sigma@grad_ln_rho0) + (1/rho0)*sigma@grad_mu_diff
+                self.namespace['visc_div_stress_L_RHS_{}'.format(bn)] = visc_div_stress_L_RHS = d3.Grid(grid_mu_diff*grid_inv_rho0)*(d3.div(sigma) - sigma_RHS@grid_grad_ln_rho0) + grid_inv_rho0*sigma_RHS@grid_grad_mu_diff
+                self.namespace['visc_div_stress_R_{}'.format(bn)] = visc_div_stress_R = (grid_inv_rho_full - grid_inv_rho0)*visc_div_stress_L_RHS + grid_mu_diff*grid_inv_rho_full*(sigma_RHS@grid_grad_ln_rho1)
+                self.namespace['VH_{}'.format(bn)] = VH = (grid_nu_diff)*(d3.trace(E_RHS@E_RHS) - (1/3)*grid_div_u**2)*2
 
             #Linear Pomega = R * T
             self.namespace['pom1_over_pom0_{}'.format(bn)] = pom1_over_pom0 = gamma*(s1/Cp + ((gamma-1)/gamma)*ln_rho1)
