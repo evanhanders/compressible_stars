@@ -669,7 +669,12 @@ class SphericalCompressibleProblem():
                     #If there are no shell bases
                     u_BCs['BC_u1_{}'.format(bn)] = "radial(u_{0}(r={1})) = 0".format(bn, basis.radius)
                     u_BCs['BC_u2_{}'.format(bn)] = "angular(radial(E_{0}(r={1}))) = 0".format(bn, basis.radius)
-                    T_BCs['BC_T_outer_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radius) #needed for energy conservation
+                    if config.numerics['thermal_BC'] == 'gradT':
+                        T_BCs['BC_T_outer_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radius) #needed for energy conservation
+                    elif config.numerics['thermal_BC'] == 's':
+                        T_BCs['BC_T_outer_{}'.format(bn)] = "s1_{0}(r={1}) = 0".format(bn, basis.radius)
+                    else:
+                        raise ValueError("Unknown thermal BC choice, please use 'gradT' or 's'")
                 else:
                     #Stitch to shell basis above
                     shell_name = self.bases_keys[basis_number+1] 
@@ -695,7 +700,12 @@ class SphericalCompressibleProblem():
                     #top of domain
                     u_BCs['BC_u2_{}'.format(bn)] = "radial(u_{0}(r={1})) = 0".format(bn, basis.radii[1])
                     u_BCs['BC_u3_{}'.format(bn)] = "angular(radial(E_{0}(r={1}))) = 0".format(bn, basis.radii[1])
-                    T_BCs['BC_T_outer_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radii[1])
+                    if config.numerics['thermal_BC'] == 'gradT':
+                        T_BCs['BC_T_outer_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radii[1])
+                    elif config.numerics['thermal_BC'] == 's':
+                        T_BCs['BC_T_outer_{}'.format(bn)] = "s1_{0}(r={1}) = 0".format(bn, basis.radii[1])
+                    else:
+                        raise ValueError("Unknown thermal BC choice, please use 'gradT' or 's'")
 
 
         #Add equations to problem
@@ -732,11 +742,15 @@ class SphericalCompressibleProblem():
 
         for name, BC in T_BCs.items():
             if 'outer' in name:
-                energy_constraint = (FlucE_LHS, FlucE_RHS)
-                logger.info('adding BC "{}" (ntheta != 0)'.format(BC))
-                logger.info('adding BC "{}" (ntheta == 0)'.format([str(o) for o in energy_constraint]))
-                problem.add_equation(BC, condition="ntheta != 0")
-                problem.add_equation(energy_constraint, condition="ntheta == 0")
+                if 'force_E_conservation' in config.numerics.keys() and config.numerics['force_E_conservation']:
+                    energy_constraint = (FlucE_LHS, FlucE_RHS)
+                    logger.info('adding BC "{}" (ntheta != 0)'.format(BC))
+                    logger.info('adding BC "{}" (ntheta == 0)'.format([str(o) for o in energy_constraint]))
+                    problem.add_equation(BC, condition="ntheta != 0")
+                    problem.add_equation(energy_constraint, condition="ntheta == 0")
+                else:
+                    logger.info('adding BC "{}"'.format(BC))
+                    problem.add_equation(BC)
             else:
                 logger.info('adding BC "{}"'.format(BC))
                 problem.add_equation(BC)
