@@ -254,6 +254,11 @@ class ConvectionSimStarBuilder:
             self.interpolations['L_heat'] = interp1d(r_nd, structure.L_conv/nd.lum_nd, **interp_kwargs)
         else:
             raise ValueError("Specified equation formulation {} not supported".format(config.numerics['equations']))
+    
+        # Interpolate gravitational potential; set to zero at the surface
+        r_nd = structure.r/nd.L_nd
+        self.interpolations['g_phi'] = interp1d(r_nd, (structure.g_phi - structure.g_phi[r_nd > self.r_bound_nd[-1]][0])* (nd.tau_nd**2 / nd.L_nd**2) , **interp_kwargs)
+
 
     def _hydrostatic_nlbvp(self):
         """ 
@@ -523,7 +528,9 @@ class ConvectionSimStarBuilder:
         self.nd['s_nd']         = s_nd    = L_nd**2 / tau_nd**2 / T_nd
         self.nd['H_nd']         = H_nd    = (m_nd / L_nd) * tau_nd**-3
         self.nd['lum_nd']       = lum_nd  = L_nd**2 * m_nd / (tau_nd**2) / tau_nd
-        self.nd['H0']           = H0  = np.max((structure.rho*structure.eps_nuc)[self.cz_bool])
+#        self.nd['H0']           = H0  = np.max((structure.rho*structure.eps_nuc)[self.cz_bool]) #works for fully convective or core
+        Q = np.gradient(structure.L_conv, structure.r)/(4*np.pi*structure.r**2)
+        self.nd['H0']           = H0 = np.max(Q[self.cz_bool])
         self.nd['tau_heat']     = tau_heat  = ((H0*L_nd/m_nd)**(-1/3)).cgs 
         self.nd['s_motions']    = s_motions    = L_nd**2 / tau_heat**2 / structure.T[mesa_index]
         logger.info('Nondimensionalization: L_nd = {:.2e}, T_nd = {:.2e}, m_nd = {:.2e}, tau_nd = {:.2e}'.format(L_nd, T_nd, m_nd, tau_nd))
@@ -566,7 +573,28 @@ class ConvectionSimStarBuilder:
     
     def _construct_diffusivities(self):
         """ Define the diffusivities to use in the simulation. Adds the following keys to self.reader.structure: 'sim_nu_diff', 'sim_rad_diff'"""
-        pass
+        structure = SimpleNamespace(**self.reader.structure)
+        nd = SimpleNamespace(**self.nd)
+        self.nd['rad_diff_cutoff'] = rad_diff_cutoff = (1/(config.numerics['prandtl']*config.numerics['reynolds_target'])) * ((nd.L_CZ**2/nd.tau_heat) / (nd.L_nd**2/nd.tau_nd))
+        if 'constant_diffusivities' in config.numerics.keys() and config.numerics['constant_diffusivities']:
+            # Thermal Diffusivity is constant everywhere, except where true radiative diffusion in the star > that constant.
+            # Viscous Diffusion is constant everywehere.
+            rad_diff_nd = structure.rad_diff * (nd.tau_nd / nd.L_nd**2)
+            self.reader.structure['sim_rad_diff'] = sim_rad_diff = np.copy(rad_diff_nd) + rad_diff_cutoff
+            self.reader.structure['sim_nu_diff'] = sim_nu_diff = config.numerics['prandtl']*rad_diff_cutoff*np.ones_like(sim_rad_diff)
+            logger.info('rad_diff cutoff: {:.3e}'.format(rad_diff_cutoff))
+            logger.info('rad_diff cutoff (dimensional): {:.3e}'.format(rad_diff_cutoff * (nd.L_nd**2/nd.tau_nd)))
+        elif 'constant_dynamic_diffusivities' in config.numerics.keys() and config.numerics['constant_dynamic_diffusivities']:
+            # Dynamic diffusivities (radiative conductivity = rho * cp * chi and dynamic viscosity = rho * nu) are constant; set at base of CZ.
+            k_rad = rad_diff_cutoff * (structure.rho[self.cz_bool][0]/nd.rho_nd) * (structure.cp[self.cz_bool][0]/nd.s_nd)
+            Pr = config.numerics['prandtl'] #nu / chi = (mu/rho) / (k/rho/cp) = mu * cp / k
+            mu = Pr * k_rad / (structure.cp[self.cz_bool][0]/nd.s_nd)
+            self.reader.structure['sim_rad_diff'] = sim_rad_diff = k_rad / (structure.rho/nd.rho_nd) / nd.Cp
+            self.reader.structure['sim_nu_diff'] = sim_nu_diff = mu / (structure.rho/nd.rho_nd)
+            logger.info('Simulation Pr: {:.3e}, mu: {:.3e}, k_rad: {:.3e}'.format(Pr, mu, k_rad))
+        else:
+            raise NotImplementedError('Must specify constant_diffusivities=True or constant_dynamic_diffusivities=True')
+
     
     def _get_Fconv(self):
         """ defines a function self.F_conv_func which returns the convective flux at a given nondimensional simulation radius """
@@ -579,6 +607,83 @@ class ConvectionSimStarBuilder:
         """
         pass
 
+class FullyConvectiveStarBuilder(ConvectionSimStarBuilder):
+    """ Builds the NCCs for a low-mass fully convective star. """
+
+    def __init__(self, *args, cooling_transition_width=0.2, **kwargs):
+        self.cooling_transition_width = cooling_transition_width
+        super().__init__(*args, **kwargs)
+
+    def _define_cz_bounds(self):
+        """ Defines self.r_bounds, self.r_bools, self.sim_bool, and self.cz_bool. """
+        structure = SimpleNamespace(**self.reader.structure)
+        
+        # Specify fraction of total star to simulate
+        self.r_bounds = list(config.star['r_bounds'])
+        self.r_bools = []
+        for i, rb in enumerate(self.r_bounds):
+            if type(rb) == str:
+                if 'R' in rb:
+                    self.r_bounds[i] = float(rb.replace('R', ''))*structure.R_star
+                elif 'L' in rb:
+                    self.r_bounds[i] = float(rb.replace('L', ''))*structure.R_star
+                else:
+                    try:
+                        self.r_bounds[i] = float(self.r_bounds[i]) * u.cm
+                    except:
+                        raise ValueError("index {} ('{}') of r_bounds is poorly specified".format(i, rb))
+                self.r_bounds[i] = structure.R_star*np.around(self.r_bounds[i]/structure.R_star, decimals=2)
+        for i, rb in enumerate(self.r_bounds):
+            if i < len(self.r_bounds) - 1:
+                self.r_bools.append((structure.r > self.r_bounds[i])*(structure.r <= self.r_bounds[i+1]))
+        logger.info('fraction of FULL star simulated: {:.2f}, up to r={:.3e}'.format(self.r_bounds[-1]/structure.R_star, self.r_bounds[-1]))
+        self.reader.structure['sim_bool'] = self.sim_bool      = (structure.r > self.r_bounds[0])*(structure.r <= self.r_bounds[-1])
+        self.reader.structure['cz_bool'] = self.cz_bool       = (structure.r <= structure.R_star)
+        logger.info('fraction of stellar mass simulated: {:.7f}'.format(structure.mass[self.sim_bool][-1]/structure.mass[-1]))
+
+    def _nondimensionalize(self):
+        """ Nondimensionalize T, t, and m at the outer boundary of the simulation domain. 
+            But -- nondimensionalize length scale using R_star. """
+        structure = SimpleNamespace(**self.reader.structure)
+        L_nd = structure.R_star
+        mesa_index = np.where(structure.r == structure.r[structure.sim_bool][-1])[0][0]
+        m_nd = structure.rho[mesa_index] * L_nd**3
+        T_nd = structure.T[mesa_index]
+        #set based on Cp; can form a timescale from 1/sqrt(Cp * T_nd / L_nd^2)
+        tau_nd  = 1/np.sqrt(structure.cp[mesa_index] * T_nd / L_nd**2).cgs
+        super()._nondimensionalize(L_nd, T_nd, m_nd, tau_nd, mesa_index)
+
+    def _get_Fconv(self):
+        """ defines a function self.F_conv_func which returns the convective flux at a given nondimensional simulation radius """
+        structure = SimpleNamespace(**self.reader.structure)
+        nd = SimpleNamespace(**self.nd)
+        L_conv_sim = np.copy(structure.L_conv)
+        # Construct convective flux function which determines how convection is driven
+        if 'heat_only' in config.star.keys() and config.star['heat_only']:
+            #don't include radiative to put flux -> 0; instead, from the max point outwards, just carry the max convective luminosity.
+            argmax = np.argmax(L_conv_sim)
+            L_conv_sim[argmax:] = L_conv_sim[argmax]
+        elif 'analytic_smooth_h' in config.star.keys() and  config.star['analytic_smooth_h']:
+            # smoothly transition from the true convective luminosity to 0 convective luminosity at outer boundary using a parabola.
+            argtran = np.argmin(np.abs( structure.r[self.sim_bool][-1]*(1-self.cooling_transition_width) - structure.r ))
+            L_conv_sim[argtran:] = L_conv_sim[argtran]*(1 - ((structure.r[argtran:] - structure.r[argtran])/(structure.r[self.sim_bool][-1]*self.cooling_transition_width))**2)
+            self.nd['parabola_r_argmax'] = structure.r[argtran]/nd.L_nd
+            self.nd['parabola_r_width']  = structure.r[self.sim_bool][-1]*self.cooling_transition_width/nd.L_nd
+        else:
+            raise NotImplementedError("must use smooth_h, heat_only, or analytic_smooth_h")
+        L_conv_sim /= (structure.r/nd.L_nd)**2 * (4*np.pi)
+        self.F_conv_func = interp1d(structure.r/nd.L_nd, L_conv_sim/nd.lum_nd, **interp_kwargs)
+    
+    def _get_stability(self):
+        """ 
+        Defines the stability profile in the simulation.
+        If equation formulation is FC_HD, defines the the function self.N2_func
+        """
+        if config.numerics['equations'] == 'FC_HD':   
+            self.N2_func = lambda r: 0*r
+        else:
+            raise NotImplementedError("must use FC_HD")
+        
 class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
     """ Builds the NCCs for a massive star's core convection zone and radiative envelope. """
 
@@ -587,8 +692,7 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         super().__init__(*args, **kwargs)
 
     def _define_cz_bounds(self):
-        """ Abstract class; must set self.r_bounds and self.r_bools. 
-        Also defines two boolean arrays: self.sim_bool and self.cz_bool that are the size of the MESA grid """
+        """ Defines self.r_bounds, self.r_bools, self.sim_bool, and self.cz_bool. """
         structure = SimpleNamespace(**self.reader.structure)
         self.core_cz_radius = find_core_cz_radius(self.mesa_file_path, dimensionless=False)
         
@@ -642,39 +746,6 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
         self.grad_s_transition_point = self.r_bound_nd[1] - self.grad_s_width
         logger.info('using grad s transition point = {}'.format(self.grad_s_transition_point))
         logger.info('using grad s width = {}'.format(self.grad_s_width))
-
-    def _interpolate_mesa_fields(self):
-        #Adjust g_phi constant
-        super()._interpolate_mesa_fields()
-        structure = SimpleNamespace(**self.reader.structure)
-        nd = SimpleNamespace(**self.nd)
-        r_nd = structure.r/nd.L_nd
-        self.interpolations['g_phi'] = interp1d(r_nd, (structure.g_phi - structure.g_phi[r_nd > self.r_bound_nd[-1]][0])* (nd.tau_nd**2 / nd.L_nd**2) , **interp_kwargs)
-
-    def _construct_diffusivities(self, constant_diffusivities=False, constant_dynamic_diffusivities=False):
-        """ Define the diffusivities to use in the simulation. Adds the following keys to self.reader.structure: 'sim_nu_diff', 'sim_rad_diff'"""
-        structure = SimpleNamespace(**self.reader.structure)
-        nd = SimpleNamespace(**self.nd)
-        self.nd['rad_diff_cutoff'] = rad_diff_cutoff = (1/(config.numerics['prandtl']*config.numerics['reynolds_target'])) * ((nd.L_CZ**2/nd.tau_heat) / (nd.L_nd**2/nd.tau_nd))
-        if 'constant_diffusivities' in config.numerics.keys() and config.numerics['constant_diffusivities']:
-            # Thermal Diffusivity is constant everywhere, except where true radiative diffusion in the star > that constant.
-            # Viscous Diffusion is constant everywehere.
-            rad_diff_nd = structure.rad_diff * (nd.tau_nd / nd.L_nd**2)
-            self.reader.structure['sim_rad_diff'] = sim_rad_diff = np.copy(rad_diff_nd) + rad_diff_cutoff
-            self.reader.structure['sim_nu_diff'] = sim_nu_diff = config.numerics['prandtl']*rad_diff_cutoff*np.ones_like(sim_rad_diff)
-            logger.info('rad_diff cutoff: {:.3e}'.format(rad_diff_cutoff))
-            logger.info('rad_diff cutoff (dimensional): {:.3e}'.format(rad_diff_cutoff * (nd.L_nd**2/nd.tau_nd)))
-        elif 'constant_dynamic_diffusivities' in config.numerics.keys() and config.numerics['constant_dynamic_diffusivities']:
-            # Dynamic diffusivities (radiative conductivity = rho * cp * chi and dynamic viscosity = rho * nu) are constant; set at base of CZ.
-            k_rad = rad_diff_cutoff * (structure.rho[0]/nd.rho_nd) * (structure.cp[0]/nd.s_nd)
-            Pr = config.numerics['prandtl'] #nu / chi = (mu/rho) / (k/rho/cp) = mu * cp / k
-            mu = Pr * k_rad / (structure.cp[0]/nd.s_nd)
-            self.reader.structure['sim_rad_diff'] = sim_rad_diff = k_rad / (structure.rho/nd.rho_nd) / nd.Cp
-            self.reader.structure['sim_nu_diff'] = sim_nu_diff = mu / (structure.rho/nd.rho_nd)
-            logger.info('Simulation Pr: {:.3e}, mu: {:.3e}, k_rad: {:.3e}'.format(Pr, mu, k_rad))
-        else:
-            raise NotImplementedError('Must specify constant_diffusivities=True or constant_dynamic_diffusivities=True')
-
     
     def _get_Fconv(self):
         """ defines a function self.F_conv_func which returns the convective flux at a given nondimensional simulation radius """
@@ -742,9 +813,11 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
                 self.ncc_dict['grad_s0']['field_{}'.format(bn)]['g'] 
 
 
-def build_nccs(plot_nccs=True, grad_s_transition_default=0.03, reapply_grad_s_filter=False):
+def build_nccs(plot_nccs=True, **kwargs):
     print(config.star['type'].lower())
     if config.star['type'].lower() == 'massive':
-        builder = MassiveCoreStarBuilder(plot=plot_nccs, grad_s_transition_default=grad_s_transition_default)
+        builder = MassiveCoreStarBuilder(plot=plot_nccs, **kwargs)
+    elif config.star['type'].lower() == 'fullconv':
+        builder = FullyConvectiveStarBuilder(plot=plot_nccs, **kwargs)
     else:
         raise NotImplementedError("Can only simulate massive stars right now.")
