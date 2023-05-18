@@ -328,10 +328,15 @@ class ConvectionSimStarBuilder:
                         name = self.ncc_dict[ncc]['grad_name']
                         logger.info('getting grad {}'.format(name))
                         grad_field = d3.grad(self.ncc_dict[ncc]['field_{}'.format(bn)]).evaluate()
-                        grad_field.change_scales((1,1,(Nmax+1)/self.resolutions[self.bases_keys == bn][2]))
-                        grad_field.change_scales(basis.dealias)
+                        if Nmax - 1 != 0:
+                            grad_field.change_scales((1,1,(Nmax-1)/self.resolutions[self.bases_keys == bn][2]))
+                            grad_field['g']
+                            grad_field['c'][np.abs(grad_field['c']) < config.numerics['ncc_cutoff']] = 0
+                            grad_field.change_scales(basis.dealias)
+                        else:
+                            grad_field['g'] = 0
                         self.ncc_dict[name]['field_{}'.format(bn)] = grad_field
-                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax+1
+                        self.ncc_dict[name]['Nmax_{}'.format(bn)] = Nmax-1
                     if self.ncc_dict[ncc]['get_inverse']: #If another NCC needs the inverse of this one, build it
                         name = 'inv_{}'.format(ncc)
                         inv_func = lambda r: 1/interp_func(r)
