@@ -101,3 +101,32 @@ def find_core_cz_radius(mesa_file, dimensionless=True, L_conv_threshold=1):
         return core_cz_radius.value
     else:
         return core_cz_radius
+
+def find_envelope_cz_bottom(mesa_file, dimensionless=True, L_conv_threshold=1):
+    """ 
+    Find the radial coordinate of the bottom boundary of an envelope convection zone in a MESA profile.
+    The convective zone is defined as the region where the convective luminosity is greater than a threshold.
+
+    Arguments:
+    ----------
+    mesa_file : str
+        Path to MESA profile file
+    dimensionless : bool
+        If True, return the radius as a float without astropy units attached.
+    L_conv_threshold : float
+        Threshold for determining if a region is convective.
+    """
+    p = mr.MesaData(mesa_file)
+    r              = (p.radius[::-1] * u.R_sun).cgs
+    mass           = (p.mass[::-1] * u.M_sun).cgs
+    Luminosity     = (p.luminosity[::-1] * u.L_sun).cgs
+    conv_L_div_L   = p.lum_conv_div_L[::-1]
+    L_conv         = conv_L_div_L*Luminosity
+
+    cz_bool = (L_conv.value > L_conv_threshold)
+    bot_index  = np.argmin(np.abs(mass - mass[cz_bool][0]))
+    bot_cz_radius = r[bot_index]
+    if dimensionless: #no astropy units.
+        return bot_cz_radius.value
+    else:
+        return bot_cz_radius

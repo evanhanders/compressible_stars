@@ -17,7 +17,7 @@ import compstar
 from .compressible_functions import make_bases
 from .parser import name_star
 from .bvp_functions import HSE_solve
-from compstar.tools.mesa import DimensionalMesaReader, find_core_cz_radius
+from compstar.tools.mesa import DimensionalMesaReader, find_core_cz_radius, find_envelope_cz_bottom
 from compstar.tools.general import one_to_zero, zero_to_one
 import compstar.defaults.config as config
 
@@ -218,7 +218,7 @@ class ConvectionSimStarBuilder:
     def _make_bases(self):
         """ Construct the dedalus bases """
         stitch_radii = self.r_bound_nd[1:-1]
-        self.coords, self.dist, self.bases, self.bases_keys = make_bases(self.resolutions, stitch_radii, self.r_bound_nd[-1], dealias=(1,1,self.dealias), dtype=self.dtype, mesh=None)
+        self.coords, self.dist, self.bases, self.bases_keys = make_bases(self.resolutions, stitch_radii, self.r_bound_nd[-1], r_inner=self.r_bound_nd[0], dealias=(1,1,self.dealias), dtype=self.dtype, mesh=None)
         self.dedalus_r = OrderedDict()
         for bn in self.bases.keys():
             phi, theta, r_vals = self.bases[bn].global_grids((1, 1, self.dealias))
@@ -272,7 +272,7 @@ class ConvectionSimStarBuilder:
         if config.numerics['equations'] == 'FC_HD':
             if 'analytic_smooth_h' in config.star.keys() and config.star['analytic_smooth_h']:
                 smooth_edge = False
-            elif 'heat_only' in config.numerics.keys() and config.numerics['heat_only']:
+            elif 'heat_only' in config.star.keys() and config.star['heat_only']:
                 smooth_edge = False
             else:
                 smooth_edge = True
@@ -391,6 +391,7 @@ class ConvectionSimStarBuilder:
             # Save simulation stitch points
             f['scalars/r_stitch'] = self.r_bound_nd[1:-1]
             f['scalars/r_outer']  = self.r_bound_nd[-1]
+            f['scalars/r_inner']  = self.r_bound_nd[0]
             
             # Save MESA profiles.
             f.create_group('mesa')
@@ -449,7 +450,7 @@ class ConvectionSimStarBuilder:
 
             plot_ncc_figure(rvals, this_interp_func, dedalus_yvals, target=this_target_func, Ns=nvals, \
                         ylabel=ylabel, fig_name=ncc, out_dir=self.out_dir, log=log, ylim=ylim, \
-                        r_int=self.r_bound_nd[1:-1], axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
+                        r_int=self.r_bound_nd, axhline=axhline, ncc_cutoff=config.numerics['ncc_cutoff'])
         logger.info('We recommend looking at the plots in {}/ to make sure the non-constant coefficients look reasonable'.format(self.out_dir))
 
         if config.numerics['equations'] == 'FC_HD':
@@ -522,7 +523,7 @@ class ConvectionSimStarBuilder:
         self.nd['T_nd'] = T_nd
         self.nd['m_nd'] = m_nd
         self.nd['tau_nd'] = tau_nd
-        self.nd['r_nd_coord']   = structure.r[mesa_index] / L_nd
+        self.nd['r_nd_coord']   = (structure.r[mesa_index] / L_nd).value
         self.nd['rho_nd']       = rho_nd  = m_nd/L_nd**3
         self.nd['u_nd']         = u_nd    = L_nd/tau_nd
         self.nd['s_nd']         = s_nd    = L_nd**2 / tau_nd**2 / T_nd
@@ -684,6 +685,86 @@ class FullyConvectiveStarBuilder(ConvectionSimStarBuilder):
         else:
             raise NotImplementedError("must use FC_HD")
         
+class ConvectiveEnvelopeStarBuilder(ConvectionSimStarBuilder):
+    """ Builds the NCCs for an intermediate-mass star with a convective envelope. """
+
+    def __init__(self, *args, cooling_transition_width=0.2, **kwargs):
+        self.cooling_transition_width = cooling_transition_width
+        super().__init__(*args, **kwargs)
+
+    def _define_cz_bounds(self):
+        """ Defines self.r_bounds, self.r_bools, self.sim_bool, and self.cz_bool. """
+        structure = SimpleNamespace(**self.reader.structure)
+        
+        # Specify fraction of total star to simulate
+        r_bot_cz = find_envelope_cz_bottom(self.mesa_file_path, dimensionless=False)
+        L_cz = structure.R_star - r_bot_cz
+        self.r_bounds = list(config.star['r_bounds'])
+        self.r_bools = []
+        for i, rb in enumerate(self.r_bounds):
+            if type(rb) == str:
+                if 'R' in rb:
+                    self.r_bounds[i] = float(rb.replace('R', ''))*structure.R_star
+                elif 'CZ' in rb: # 0CZ is bottom of CZ, 1CZ is top of CZ.
+                    self.r_bounds[i] = float(rb.replace('CZ', ''))*L_cz + r_bot_cz
+                else:
+                    try:
+                        self.r_bounds[i] = float(self.r_bounds[i]) * u.cm
+                    except:
+                        raise ValueError("index {} ('{}') of r_bounds is poorly specified".format(i, rb))
+                self.r_bounds[i] = structure.R_star*np.around(self.r_bounds[i]/structure.R_star, decimals=2)
+        for i, rb in enumerate(self.r_bounds):
+            if i < len(self.r_bounds) - 1:
+                self.r_bools.append((structure.r > self.r_bounds[i])*(structure.r <= self.r_bounds[i+1]))
+        logger.info('fraction of FULL star simulated: r={:.3e}-{:.3e}'.format(self.r_bounds[0]/structure.R_star, self.r_bounds[-1]/structure.R_star))
+        self.reader.structure['sim_bool'] = self.sim_bool      = (structure.r > self.r_bounds[0])*(structure.r <= self.r_bounds[-1])
+        self.reader.structure['cz_bool'] = self.cz_bool       = (structure.r > r_bot_cz)*(structure.r <= structure.R_star)
+
+    def _nondimensionalize(self):
+        """ Nondimensionalize T, t, and m at the outer boundary of the simulation domain. 
+            But -- nondimensionalize length scale using CZ depth. """
+        structure = SimpleNamespace(**self.reader.structure)
+        r_bot_cz = find_envelope_cz_bottom(self.mesa_file_path, dimensionless=False)
+        L_nd = structure.R_star - r_bot_cz
+        mesa_index = np.where(structure.r == structure.r[structure.sim_bool][-1])[0][0]
+        m_nd = structure.rho[mesa_index] * L_nd**3
+        T_nd = structure.T[mesa_index]
+        #set based on Cp; can form a timescale from 1/sqrt(Cp * T_nd / L_nd^2)
+        tau_nd  = 1/np.sqrt(structure.cp[mesa_index] * T_nd / L_nd**2).cgs
+        super()._nondimensionalize(L_nd, T_nd, m_nd, tau_nd, mesa_index)
+
+    def _get_Fconv(self):
+        """ defines a function self.F_conv_func which returns the convective flux at a given nondimensional simulation radius """
+        structure = SimpleNamespace(**self.reader.structure)
+        nd = SimpleNamespace(**self.nd)
+        L_conv_sim = np.copy(structure.L_conv)
+        # Construct convective flux function which determines how convection is driven
+        if 'heat_only' in config.star.keys() and config.star['heat_only']:
+            #don't include radiative to put flux -> 0; instead, from the max point outwards, just carry the max convective luminosity.
+            argmax = np.argmax(L_conv_sim)
+            L_conv_sim[argmax:] = L_conv_sim[argmax]
+        elif 'analytic_smooth_h' in config.star.keys() and  config.star['analytic_smooth_h']:
+            # smoothly transition from the true convective luminosity to 0 convective luminosity at outer boundary using a parabola.
+            argtran = np.argmin(np.abs( structure.r[self.sim_bool][-1]*(1-self.cooling_transition_width) - structure.r ))
+            L_conv_sim[argtran:] = L_conv_sim[argtran]*(1 - ((structure.r[argtran:] - structure.r[argtran])/(structure.r[self.sim_bool][-1]*self.cooling_transition_width))**2)
+            self.nd['parabola_r_argmax'] = structure.r[argtran]/nd.L_nd
+            self.nd['parabola_r_width']  = structure.r[self.sim_bool][-1]*self.cooling_transition_width/nd.L_nd
+        else:
+            raise NotImplementedError("must use smooth_h, heat_only, or analytic_smooth_h")
+        L_conv_sim /= (structure.r/nd.L_nd)**2 * (4*np.pi)
+        self.F_conv_func = interp1d(structure.r/nd.L_nd, L_conv_sim/nd.lum_nd, **interp_kwargs)
+    
+    def _get_stability(self):
+        """ 
+        Defines the stability profile in the simulation.
+        If equation formulation is FC_HD, defines the the function self.N2_func
+        TODO: allow for stable envelope below convection zone.
+        """
+        if config.numerics['equations'] == 'FC_HD':   
+            self.N2_func = lambda r: 0*r
+        else:
+            raise NotImplementedError("must use FC_HD")
+        
 class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
     """ Builds the NCCs for a massive star's core convection zone and radiative envelope. """
 
@@ -814,10 +895,11 @@ class MassiveCoreStarBuilder(ConvectionSimStarBuilder):
 
 
 def build_nccs(plot_nccs=True, **kwargs):
-    print(config.star['type'].lower())
     if config.star['type'].lower() == 'massive':
         builder = MassiveCoreStarBuilder(plot=plot_nccs, **kwargs)
     elif config.star['type'].lower() == 'fullconv':
         builder = FullyConvectiveStarBuilder(plot=plot_nccs, **kwargs)
+    elif config.star['type'].lower() == 'envelope':
+        builder = ConvectiveEnvelopeStarBuilder(plot=plot_nccs, **kwargs)
     else:
         raise NotImplementedError("Can only simulate massive stars right now.")

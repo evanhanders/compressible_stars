@@ -10,30 +10,52 @@ logger = logging.getLogger(__name__)
 
 import compstar.defaults.config as config
 
-def make_bases(resolutions, stitch_radii, radius, dealias=3/2, dtype=np.float64, mesh=None):
+def make_bases(resolutions, stitch_radii, radius, r_inner=0, dealias=3/2, dtype=np.float64, mesh=None):
     """ 
     Creates Dedalus BallBasis and ShellBasis objects for a spherical problem with adjacent radial domains.
-    The basis objects are returned in an OrderedDict, with the keys 'B' and 'S1', 'S2', etc.
-    The first basis is a BallBasis, and the rest are ShellBases.
-    TODO: generalize so that the first basis can be a ShellBasis.
+    The basis objects are returned in an OrderedDict, with the key being either 'B' or 'S0', and the rest being 'S1', 'S2', etc.
+    The first basis can be a BallBasis or ShellBasis, and the rest are ShellBases.
+
+    Inputs:
+    -------
+    resolutions : list of ints
+        The resolution of each radial domain. Length N
+    stitch_radii : list of floats
+        The radii of the interfaces between the radial domains. Length N-1
+    radius : float
+        The radius of the outer boundary of the domain.
+    r_inner : float
+        The radius of the inner boundary of the domain. (default 0)
+    dealias : float
+        The dealiasing factor for the problem.
+    dtype : numpy dtype
+        The data type for the problem. (float64 for IVP; complex128 for EVP)
+    mesh : list of ints
+        The processor mesh for the problem.
     """
     bases = OrderedDict()
     coords  = d3.SphericalCoordinates('phi', 'theta', 'r')
     dist    = d3.Distributor((coords,), mesh=mesh, dtype=dtype)
-    bases_keys = ['B']
+    bases_keys = []
     for i, resolution in enumerate(resolutions):
-        if i == 0:
+        if len(bases_keys) == 0 and r_inner == 0:
             if len(resolutions) == 1:
                 ball_radius = radius
             else:
                 ball_radius = stitch_radii[i]
             bases['B']   = d3.BallBasis(coords, resolution, radius=ball_radius, dtype=dtype, dealias=dealias)
+            bases_keys += ['B']
         else:
-            if len(resolutions) == i+1:
-                shell_radii = (stitch_radii[i-1], radius)
+            shell_radii = []
+            if i == 0: #Inner bound
+                shell_radii.append(r_inner)
             else:
-                shell_radii = (stitch_radii[i-1], stitch_radii[i])
-            bases['S{}'.format(i)] = d3.ShellBasis(coords, resolution, radii=shell_radii, dtype=dtype, dealias=dealias)
+                shell_radii.append(stitch_radii[i-1])
+            if len(resolutions) == i+1: #Outer bound
+                shell_radii.append(radius)
+            else:
+                shell_radii.append(stitch_radii[i])
+            bases['S{}'.format(i)] = d3.ShellBasis(coords, resolution, radii=tuple(shell_radii), dtype=dtype, dealias=dealias)
             bases_keys += ['S{}'.format(i)]
     return coords, dist, bases, bases_keys
 
@@ -42,7 +64,7 @@ class SphericalCompressibleProblem():
     A class for setting up a Compressible Convection problem in Spherical coordinates in Dedalus.
     """
 
-    def __init__(self, resolutions, stitch_radii, radius, ncc_file, dealias=3/2, 
+    def __init__(self, resolutions, stitch_radii, radius, ncc_file, r_inner=0, dealias=3/2, 
                  dtype=np.float64, mesh=None, sponge=False, do_rotation=False, sponge_function=lambda r: r**2):
         """
         Parameters
@@ -57,6 +79,8 @@ class SphericalCompressibleProblem():
             The radial coordinate of the outer boundary of the problem.
         ncc_file : str
             The path to the HDF5 file containing the stellar model stratification.
+        r_inner : float
+            The radial coordinate of the inner boundary of the problem. (default 0)
         dealias : float
             The dealiasing factor for the problem.
         dtype : numpy dtype
@@ -72,13 +96,14 @@ class SphericalCompressibleProblem():
         """
         self.stitch_radii = stitch_radii
         self.radius = radius
+        self.r_inner = r_inner
         self.ncc_file = ncc_file
         self.sponge = sponge
         self.do_rotation = do_rotation
         self.sponge_function = sponge_function
         self.fields_filled = False
 
-        coords, dist, bases, bases_keys = make_bases(resolutions, stitch_radii, radius, dealias=dealias, dtype=dtype, mesh=mesh)
+        coords, dist, bases, bases_keys = make_bases(resolutions, stitch_radii, radius, r_inner=r_inner, dealias=dealias, dtype=dtype, mesh=mesh)
         self.coords = coords
         self.dist = dist
         self.bases = bases
@@ -195,7 +220,7 @@ class SphericalCompressibleProblem():
             self.namespace['ez_{}'.format(bn)]['g'][2] =  np.cos(theta1)
 
             # Define fields for problem constants.
-            if bn == 'B':
+            if bn == 'B' or bn == 'S0':
                 self.namespace['gamma'] = gamma = self.dist.Field(name='gamma')
                 self.namespace['R_gas'] = R_gas = self.dist.Field(name='R_gas')
                 self.namespace['Cp'] = Cp = self.dist.Field(name='Cp')
@@ -324,7 +349,7 @@ class SphericalCompressibleProblem():
                 self.namespace['grid_{}_{}'.format(fname, bn)].name = 'grid_{}_{}'.format(fname, bn) #attach a name to the fields.
 
             # Define thermodynamic constants
-            if bn == 'B':
+            if bn == 'B' or bn == 'S0':
                 gamma = self.namespace['gamma']
                 R_gas = self.namespace['R_gas']
                 Cp = self.namespace['Cp']
@@ -682,12 +707,18 @@ class SphericalCompressibleProblem():
                     u_BCs['BC_u2_{}'.format(bn)] = constant_U.format(bn, shell_name, rval)
                     T_BCs['BC_T1_{}'.format(bn)] = constant_s.format(bn, shell_name, rval)
             else:
-                #Stitch to basis below
-                below_name = self.bases_keys[basis_number - 1]
-                rval = self.stitch_radii[basis_number - 1]
-                u_BCs['BC_u1_vec_{}'.format(bn)] = constant_momentum_ang.format(bn, below_name, rval)
-                u_BCs['BC_u2_vec_{}'.format(bn)] = constant_ln_rho.format(bn, below_name, rval)
-                T_BCs['BC_T0_{}'.format(bn)] = constant_gradT.format(bn, below_name, rval)
+                print(basis_number, len(self.bases_keys), self.bases_keys)
+                if basis_number == 0: #If there are no ball bases
+                    u_BCs['BC_u1_vec_{}'.format(bn)] = "radial(u_{0}(r={1})) = 0".format(bn, basis.radii[0])
+                    u_BCs['BC_u2_vec_{}'.format(bn)] = "angular(radial(E_{0}(r={1}))) = 0".format(bn, basis.radii[0])
+                    T_BCs['BC_T0_{}'.format(bn)] = "radial(grad_pom1_{0}(r={1})) = 0".format(bn, basis.radii[0])
+                else:
+                    #Stitch to basis below
+                    below_name = self.bases_keys[basis_number - 1]
+                    rval = self.stitch_radii[basis_number - 1]
+                    u_BCs['BC_u1_vec_{}'.format(bn)] = constant_momentum_ang.format(bn, below_name, rval)
+                    u_BCs['BC_u2_vec_{}'.format(bn)] = constant_ln_rho.format(bn, below_name, rval)
+                    T_BCs['BC_T0_{}'.format(bn)] = constant_gradT.format(bn, below_name, rval)
 
                 #Add upper BCs
                 if basis_number != len(self.bases_keys) - 1:

@@ -167,12 +167,15 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     #Set boundary conditions.
     iter = 0
     for k, basis in bases.items():
-        if k != 'B':
+        if k != 'B' and k != 'S0':
             k_old = list(bases.keys())[iter-1]
             r_s = r_stitch[iter-1]
             problem.add_equation("ln_rho_{0}(r={2}) - ln_rho_{1}(r={2}) = 0".format(k, k_old, r_s))
+        elif k == 'S0':
+            problem.add_equation("ln_rho_S0(r=nondim_radius) = 0")
+        elif k == 'B':
+            problem.add_equation("ln_rho_B(r=nondim_radius) = 0")
         iter += 1
-    problem.add_equation("ln_rho_B(r=nondim_radius) = 0")
 
     solver = problem.build_solver(ncc_cutoff=ncc_cutoff)
     pert_norm = np.inf
@@ -203,15 +206,16 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     #Set the boundary conditions.
     iter = 0
     for k, basis in bases.items():
-        if k != 'B':
+        if k != 'B' and k != 'S0':
             k_old = list(bases.keys())[iter-1]
             r_s = r_stitch[iter-1]
             problem.add_equation("s_{0}(r={2}) - s_{1}(r={2}) = 0".format(k, k_old, r_s))
             problem.add_equation("g_phi_{0}(r={2}) - g_phi_{1}(r={2}) = 0".format(k, k_old, r_s))
+        else:
+            problem.add_equation("ln_pomega_LHS_{}(r=nondim_radius) = 0".format(k))
         iter += 1
         if iter == len(bases.items()):
             problem.add_equation("g_phi_{0}(r=r_outer) = 0".format(k))
-    problem.add_equation("ln_pomega_LHS_B(r=nondim_radius) = 0")
 
     #Solve with tolerances on pert_norm and hydrostatic equilibrium.
     solver = problem.build_solver(ncc_cutoff=ncc_cutoff)
@@ -290,9 +294,10 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     ax7.plot(r, -N2, label=r'$-N^2$')
     ax7.plot(r, (N2_func(r)), label=r'$N^2$ goal', ls='--')
     ax7.set_yscale('log')
-    yticks = (np.max(np.abs(N2.ravel()[r.ravel() < 0.5])), np.max(N2_func(r).ravel()))
-    ax7.set_yticks(yticks)
-    ax7.set_yticklabels(['{:.1e}'.format(n) for n in yticks])
+    if 'B' in bases.keys():
+        yticks = (np.max(np.abs(N2.ravel()[r.ravel() < 0.5])), np.max(N2_func(r).ravel()))
+        ax7.set_yticks(yticks)
+        ax7.set_yticklabels(['{:.1e}'.format(n) for n in yticks])
     ax7.legend()
     ax8.plot(r, grad_s, label='grad s')
     ax8.set_yscale('log')
