@@ -447,7 +447,7 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
         namespace['tau_s_{}'.format(k)] = tau_s = dist.Field(name='tau_s', bases=S2_basis)
         
 
-        namespace['pom1_d_pom0_{}'.format(k)] = pom1_d_pom0 = gamma*s1/Cp + ((gamma-1)/gamma)*ln_rho1
+        namespace['pom1_d_pom0_{}'.format(k)] = pom1_d_pom0 = gamma*s1/Cp + (gamma-1)*ln_rho1
         namespace['pom2_d_pom0_{}'.format(k)] = pom2_d_pom0 = np.exp(pom1_d_pom0) - (1 + pom1_d_pom0)
         namespace['pomfluc_{}'.format(k)] = pomfluc = pom0*(pom1_d_pom0 + pom2_d_pom0)
         namespace['HSE_base_{}'.format(k)] = HSE_base = gamma*(d3.grad(s1)/Cp + d3.grad(ln_rho1))
@@ -500,5 +500,16 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
     logger.info('FastIC found')
     logger.info('mass conservation: {}'.format((mass_integ_L - mass_integ_R).evaluate()['g']))
 
+#    r = local_ns['r_B']
+#    plt.plot(r.ravel(), s1['g'].ravel())
+
+#    plt.figure()
+#    plt.plot(r.ravel(), local_ns['grad_T1_B']['g'][2].ravel())
+
+#    plt.figure()
+#    plt.plot(r.ravel(), namespace['ln_rho1_B']['g'].ravel())
+#    plt.show()
+#    import sys
+#    sys.exit()
     return namespace
 
