@@ -1,12 +1,15 @@
 
 from collections import OrderedDict
 
+import h5py
 import numpy as np
 import matplotlib.pyplot as plt
 import dedalus.public as d3
+from mpi4py import MPI
+from .compressible_functions import make_bases
 
 from scipy.interpolate import interp1d
-from ..tools.general import one_to_zero
+from ..tools.general import one_to_zero, zero_to_one
 import logging
 logger = logging.getLogger(__name__)
 
@@ -320,3 +323,182 @@ def HSE_solve(coords, dist, bases, grad_ln_rho_func, N2_func, Fconv_func, r_stit
     atmosphere['s0'] = interp1d(r, s0, **interp_kwargs)
     atmosphere['L_heat'] = interp1d(r, L_heat, **interp_kwargs)
     return atmosphere
+
+def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boundary='upper'):
+    """
+    Get the initial conditions for a convection problem which has a thermal boundary layer.
+    Assumes that the background stratification is adiabatic.
+
+    
+    Parameters
+    ----------
+    problem : CompressibleProblem object
+        The dedalus problem object.
+    ncc_file : str
+        The name of the HDF5 file containing the stellar stratification.
+    namespace : dict
+        The namespace of the dedalus IVP.
+    NuvRe : function
+        A function which returns the Nusselt number as a function of the heating-timescale Reynolds number.
+    Re : float
+        The heating-timescale Reynolds number.    
+    equations : str
+        The dedalus equation formulation. Currently just 'FC_HD' is supported.
+    boundary : str
+        The boundary where the FastIC boundary layer is created. Currently just 'upper' is supported.
+    """
+    if equations != 'FC_HD':
+        raise NotImplementedError('Only FC_HD is currently supported.')
+    if boundary != 'upper':
+        raise NotImplementedError('Only upper boundary is currently supported.')
+
+    resolutions = [list(n) for n in problem.resolutions]
+    for i in range(len(resolutions)):
+        resolutions[i][0] = 1
+        resolutions[i][1] = 1
+        resolutions[i] = tuple(resolutions[i])
+    
+    #make a local copy of the dedalus coords and bases.
+    coords, dist, bases, bases_keys = make_bases(resolutions, problem.stitch_radii, problem.radius, r_inner=problem.r_inner, comm=MPI.COMM_SELF)
+    
+    #get L_heat, kappa_rad, r, ln_rho, pom0, and s0 from the NCC file for each basis.
+    fields = ['L_heat', 'kappa_rad', 'r', 'ln_rho0', 'pom0', 's0', 'g']
+    stratification = OrderedDict()
+    local_ns = OrderedDict()
+    with h5py.File(ncc_file, 'r') as f:
+        for b, basis in bases.items():
+            for field in fields:
+                name = '{}_{}'.format(field, b)
+                global_field = namespace['{}_{}'.format(field, b)]
+                if isinstance(global_field, d3.Field):
+                    local_ns[name] = dist.Field(bases=basis.radial_basis, name=name, tensorsig=tuple([coords]*len(global_field.tensorsig)), dtype=global_field.dtype)
+                    local_ns[name].change_scales(basis.dealias)
+                    local_ns[name]['g'] = f['dedalus']['{}_{}'.format(field, b)][()]
+                else:
+                    local_ns[name] = f['dedalus']['{}_{}'.format(field, b)][()]
+            local_ns['ones_{}'.format(b)] = dist.Field(bases=basis, name='ones')
+            local_ns['ones_{}'.format(b)]['g'] = 1
+        R_gas = f['scalars']['R'][()]
+        gamma_gas = f['scalars']['gamma1'][()]
+        Cp_gas = f['scalars']['Cp'][()]
+    
+    #Solve for temperature gradient amplitude at top of atmosphere
+    radius = problem.radius
+    Nu = NuvRe(Re)
+    kappa = (local_ns['ones_{}'.format(bases_keys[-1])]*local_ns['kappa_rad_{}'.format(bases_keys[-1])])(r=radius).evaluate()['g'].min()
+    dTdr = (-(local_ns['ones_{}'.format(bases_keys[-1])]*local_ns['L_heat_{}'.format(bases_keys[-1])]/kappa)(r=radius).evaluate()['g'][2] / (4*np.pi*radius**2)).min()
+
+
+    # Newton iteration to solve for the temperature gradient's shape
+    L_conv_int = np.sum([np.trapz(local_ns['L_heat_{}'.format(b)]['g'], x=local_ns['r_{}'.format(b)]) for b in bases_keys])
+    lorentzian = lambda r, delta: (1/np.pi)*(delta)/((r-radius)**2 + (delta)**2)
+    norm_lorentzian = lambda r, delta: lorentzian(r, delta)/lorentzian(radius, delta)
+    #dTdr_func = lambda r, delta: dTdr*(zero_to_one(r, radius-delta, width=delta/2) + 0.5*norm_lorentzian(r, delta))
+    dTdr_func = lambda r, delta: dTdr*norm_lorentzian(r, delta)
+    del_bl = (3*L_conv_int/(-dTdr*4*np.pi*Nu*kappa))**(1/3) #guess for the boundary layer thickness
+    err = 1e-5
+    tol = 1e-10
+    compterm = L_conv_int/(4*np.pi*Nu)
+    while np.abs(err) > tol:
+        logger.debug('FastIC err {}, del_bl {}'.format(err, del_bl))
+        #calculate magnitude of int(Lconv dr) /(4 pi Nu) + int(kappa*dTdr*r^2*dr) == err
+        err = compterm + np.sum([np.trapz(local_ns['kappa_rad_{}'.format(b)]['g']*dTdr_func(local_ns['r_{}'.format(b)], del_bl)*local_ns['r_{}'.format(b)]**2, x=local_ns['r_{}'.format(b)]) for b in bases_keys])
+        err /= compterm #fractional err
+        del_bl *= 1 + err/100
+    logger.debug('FastIC err {}, del_bl {}'.format(err, del_bl))
+    logger.info('Fast IC with Nu = {} using del_bl = {}'.format(Nu, del_bl))
+    
+    #calculate the temperature gradient as dedalus fields
+    for i, b in enumerate(bases_keys):
+        local_ns['grad_T1_{}'.format(b)] = dist.VectorField(coords, bases=basis, name='grad_T_{}'.format(b))
+        local_ns['grad_T1_{}'.format(b)].change_scales(basis.dealias)
+        local_ns['grad_T1_{}'.format(b)]['g'][2] = dTdr_func(local_ns['r_{}'.format(b)], del_bl)
+
+    # Parameters
+    namespace = dict()
+    namespace['R'] = R = dist.Field(name='R')
+    namespace['R']['g'] = R_gas
+    namespace['gamma'] = gamma = dist.Field(name='gamma')
+    namespace['gamma']['g'] = gamma_gas
+    namespace['Cp'] = Cp = dist.Field(name='Cp')
+    namespace['Cp']['g'] = Cp_gas
+    log = np.log
+    
+    #Set up a bvp that forces grad_s and grad_ln_rho to produce this grad T, then solves for s1 and ln_rho1.
+    variables = []
+    taus = []
+    for k, basis in bases.items():
+        namespace['basis_{}'.format(k)] = basis
+        namespace['S2_basis_{}'.format(k)] = S2_basis = basis.S2_basis()
+
+        # Make problem variables and taus
+        namespace['pom0_{}'.format(k)] = pom0 = local_ns['pom0_{}'.format(k)]
+        namespace['s0_{}'.format(k)] = local_ns['s0_{}'.format(k)]
+        namespace['ln_rho0_{}'.format(k)] = local_ns['ln_rho0_{}'.format(k)]
+        namespace['rho0_{}'.format(k)] = rho0 = np.exp(local_ns['ln_rho0_{}'.format(k)]).evaluate()
+        namespace['g_{}'.format(k)] = g = local_ns['g_{}'.format(k)]
+        namespace['grad_pom1_{}'.format(k)] = (namespace['R']*local_ns['grad_T1_{}'.format(k)]).evaluate()
+
+        namespace['er_{}'.format(k)] = er = dist.VectorField(coords, name='er', bases=basis.radial_basis)
+        er['g'][2] = 1
+        namespace['pom1_{}'.format(k)] = pom1 = dist.Field(name='pom1', bases=basis)
+        namespace['s1_{}'.format(k)] = s1 = dist.Field(name='s', bases=basis)
+        namespace['ln_rho1_{}'.format(k)] = ln_rho1 = dist.Field(name='ln_rho', bases=basis)
+        namespace['tau_s_{}'.format(k)] = tau_s = dist.Field(name='tau_s', bases=S2_basis)
+        
+
+        namespace['pom1_d_pom0_{}'.format(k)] = pom1_d_pom0 = gamma*s1/Cp + ((gamma-1)/gamma)*ln_rho1
+        namespace['pom2_d_pom0_{}'.format(k)] = pom2_d_pom0 = np.exp(pom1_d_pom0) - (1 + pom1_d_pom0)
+        namespace['pomfluc_{}'.format(k)] = pomfluc = pom0*(pom1_d_pom0 + pom2_d_pom0)
+        namespace['HSE_base_{}'.format(k)] = HSE_base = gamma*(d3.grad(s1)/Cp + d3.grad(ln_rho1))
+
+        # Make lift operators for BCs
+        if k == 'B':
+            namespace['lift_{}'.format(k)] = lift = lambda A: d3.Lift(A, basis, -1)
+        else:
+            namespace['lift_{}'.format(k)] = lift = lambda A: d3.Lift(A, basis.derivative_basis(2), -1)
+    
+        variables += [namespace['{}_{}'.format(var, k)] for var in ['s1', 'ln_rho1']]
+        taus += [tau_s]
+        if k == 'B' or k == 'S0':
+            namespace['tau_M'.format(k)] = tau_M = dist.Field(name='tau_M', bases=S2_basis)
+            taus += [tau_M,]
+    
+    locals().update(namespace)
+    problem = d3.NLBVP(variables + taus, namespace=locals())
+    for k, basis in bases.items():
+        #Equation is just definitional.
+        if k == 'B' or k == 'S0':
+            problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) + er*lift_{0}(tau_M) = grad_pom1_{0}".format(k))
+        else:
+            problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) = grad_pom1_{0}".format(k))
+        problem.add_equation("div(pom0_{0}*HSE_base_{0} + g_{0}*pom1_d_pom0_{0}) + lift_{0}(tau_s_{0}) = -div(pomfluc_{0}*HSE_base_{0} + g_{0}*pom2_d_pom0_{0})".format(k))
+    
+    #Set boundary conditions.
+    iter = 0
+    mass_integ_L = 0
+    mass_integ_R = 0
+    for k, basis in bases.items():
+        mass_integ_L += d3.integ(namespace['rho0_{}'.format(k)]*namespace['ln_rho1_{}'.format(k)])
+        mass_integ_R += -d3.integ(namespace['rho0_{}'.format(k)]*(np.exp(namespace['ln_rho1_{}'.format(k)]) - 1 - namespace['ln_rho1_{}'.format(k)]))
+        if iter < len(bases)-1:
+            k_next = list(bases.keys())[iter+1]
+            r_s = problem.stitch_radii[iter]
+            problem.add_equation("s1_{0}(r={2}) - s1_{1}(r={2}) = 0".format(k, k_next, r_s))
+        else:
+            #integ of mass == 0
+            problem.add_equation("s1_{0}(r={1}) = 0".format(k, radius))
+            problem.add_equation((mass_integ_L, mass_integ_R))
+        iter += 1
+
+    solver = problem.build_solver()
+    pert_norm = np.inf
+    while pert_norm > 1e-8:
+        solver.newton_iteration(damping=1)
+        pert_norm = sum(pert.allreduce_data_norm('c', 2) for pert in solver.perturbations)
+        logger.info(f'Perturbation norm: {pert_norm:.3e}')
+    logger.info('FastIC found')
+    logger.info('mass conservation: {}'.format((mass_integ_L - mass_integ_R).evaluate()['g']))
+
+    return namespace
+

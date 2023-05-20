@@ -4,13 +4,14 @@ import h5py
 import numpy as np
 import dedalus.public as d3
 from dedalus.core.operators import convert 
+from mpi4py import MPI
 
 import logging
 logger = logging.getLogger(__name__)
 
 import compstar.defaults.config as config
 
-def make_bases(resolutions, stitch_radii, radius, r_inner=0, dealias=3/2, dtype=np.float64, mesh=None):
+def make_bases(resolutions, stitch_radii, radius, r_inner=0, dealias=3/2, dtype=np.float64, mesh=None, comm=MPI.COMM_WORLD):
     """ 
     Creates Dedalus BallBasis and ShellBasis objects for a spherical problem with adjacent radial domains.
     The basis objects are returned in an OrderedDict, with the key being either 'B' or 'S0', and the rest being 'S1', 'S2', etc.
@@ -32,10 +33,12 @@ def make_bases(resolutions, stitch_radii, radius, r_inner=0, dealias=3/2, dtype=
         The data type for the problem. (float64 for IVP; complex128 for EVP)
     mesh : list of ints
         The processor mesh for the problem.
+    comm : MPI communicator
+        The MPI communicator for the problem.
     """
     bases = OrderedDict()
     coords  = d3.SphericalCoordinates('phi', 'theta', 'r')
-    dist    = d3.Distributor((coords,), mesh=mesh, dtype=dtype)
+    dist    = d3.Distributor((coords,), mesh=mesh, dtype=dtype, comm=comm)
     bases_keys = []
     for i, resolution in enumerate(resolutions):
         if len(bases_keys) == 0 and r_inner == 0:
@@ -94,6 +97,7 @@ class SphericalCompressibleProblem():
         sponge_function : function
             A function specifying the shape of the damping layer at the outer boundary.
         """
+        self.resolutions = resolutions
         self.stitch_radii = stitch_radii
         self.radius = radius
         self.r_inner = r_inner
