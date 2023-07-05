@@ -235,10 +235,12 @@ class DedalusShellSHTransformer():
                 with h5py.File(output_file_name, file_mode) as of:
                     #Set up output file; output ells, ms, time, etc.
                     sim_times = self.reader.current_file_handle['scales/sim_time'][()]
+                    write_numbers = self.reader.current_file_handle['scales/write_number'][()]
                     if ni == 0:
                         of['ells'] = self.transformer.ell_values[None,:,:,None]
                         of['ms']   = self.transformer.m_values[None,:,:,None]
                         of['time'] = sim_times[()]
+                        of['write_number'] = write_numbers[()]
                         for attr in ['writes', 'set_number', 'handler_name']:
                             of.attrs[attr] = self.reader.current_file_handle.attrs[attr]
 
