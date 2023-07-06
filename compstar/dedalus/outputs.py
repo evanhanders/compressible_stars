@@ -275,14 +275,20 @@ def initialize_outputs(solver, coords, namespace, bases, timescales, out_dir='./
                         fieldstr = output_tasks[fieldname].format(bn)
                         for base_interp in interps:
                             # Interpolation radius can either be a number or a number times 'R', where 'R' is the outer radius of the simulation.
-                            if isinstance(base_interp, str) and 'R' in base_interp:
-                                if base_interp == 'R':
-                                    interp = '1'
-                                else:
-                                    interp = base_interp.replace('R', '')
-                                interp = np.around(float(interp)*r_outer, decimals=2)
+                            if isinstance(base_interp, str):
+                                if 'R' in base_interp:
+                                    if base_interp == 'R':
+                                        interp = '1'
+                                    else:
+                                        interp = base_interp.replace('R', '')
+                                    interp = np.around(float(interp)*r_outer, decimals=2)
+                                elif '%' in base_interp:
+                                    # Interpolation radius can also be a percentage of the outer radius - inner radius span. User specifies e.g., "0%" for inner boundary, "100%" for outer, and "50%" for middle of domain.
+                                    interp = float(base_interp.replace('%', ''))/100
+                                    interp = basis.radii[0] + interp*(basis.radii[1] - basis.radii[0])
                             else:
-                                interp = np.around(float(base_interp), decimals=2)
+                                interp = float(base_interp)
+                            interp = np.around(interp, decimals=2)
                             if type(basis) == d3.BallBasis and interp > basis.radius:
                                 continue
                             elif type(basis) == d3.ShellBasis:
