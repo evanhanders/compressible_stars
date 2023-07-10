@@ -387,6 +387,7 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
     Nu = NuvRe(Re)
     kappa = (local_ns['ones_{}'.format(bases_keys[-1])]*local_ns['kappa_rad_{}'.format(bases_keys[-1])])(r=radius).evaluate()['g'].min()
     dTdr = (-(local_ns['ones_{}'.format(bases_keys[-1])]*local_ns['L_heat_{}'.format(bases_keys[-1])]/kappa)(r=radius).evaluate()['g'][2] / (4*np.pi*radius**2)).min()
+    print(kappa, dTdr)
 
 
     # Newton iteration to solve for the temperature gradient's shape
@@ -413,6 +414,8 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
         local_ns['grad_T1_{}'.format(b)] = dist.VectorField(coords, bases=basis, name='grad_T_{}'.format(b))
         local_ns['grad_T1_{}'.format(b)].change_scales(basis.dealias)
         local_ns['grad_T1_{}'.format(b)]['g'][2] = dTdr_func(local_ns['r_{}'.format(b)], del_bl)
+
+    
 
     # Parameters
     namespace = dict()
@@ -445,6 +448,7 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
         namespace['s1_{}'.format(k)] = s1 = dist.Field(name='s', bases=basis)
         namespace['ln_rho1_{}'.format(k)] = ln_rho1 = dist.Field(name='ln_rho', bases=basis)
         namespace['tau_s_{}'.format(k)] = tau_s = dist.Field(name='tau_s', bases=S2_basis)
+        namespace['tau_s2_{}'.format(k)] = tau_s2 = dist.Field(name='tau_s2', bases=S2_basis)
         
 
         namespace['pom1_d_pom0_{}'.format(k)] = pom1_d_pom0 = gamma*s1/Cp + (gamma-1)*ln_rho1
@@ -454,25 +458,31 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
 
         # Make lift operators for BCs
         if k == 'B':
-            namespace['lift_{}'.format(k)] = lift = lambda A: d3.Lift(A, basis, -1)
+            namespace['lift_{}'.format(k)] = lift = lambda A, k=-1: d3.Lift(A, basis, k)
         else:
-            namespace['lift_{}'.format(k)] = lift = lambda A: d3.Lift(A, basis.derivative_basis(2), -1)
+            namespace['lift_{}'.format(k)] = lift = lambda A, k=-1: d3.Lift(A, basis.derivative_basis(2), k)
     
         variables += [namespace['{}_{}'.format(var, k)] for var in ['s1', 'ln_rho1']]
         taus += [tau_s]
         if k == 'B' or k == 'S0':
             namespace['tau_M'.format(k)] = tau_M = dist.Field(name='tau_M', bases=S2_basis)
-            taus += [tau_M,]
+            if k == 'B':
+                taus += [tau_M,]
+            else:
+                taus += [tau_M, tau_s2]
     
     locals().update(namespace)
     problem = d3.NLBVP(variables + taus, namespace=locals())
     for k, basis in bases.items():
         #Equation is just definitional.
         if k == 'B' or k == 'S0':
-            problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) + er*lift_{0}(tau_M) = grad_pom1_{0}".format(k))
+            problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) + er_{0}*lift_{0}(tau_M) = grad_pom1_{0}".format(k))
         else:
             problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) = grad_pom1_{0}".format(k))
-        problem.add_equation("div(pom0_{0}*HSE_base_{0} + g_{0}*pom1_d_pom0_{0}) + lift_{0}(tau_s_{0}) = -div(pomfluc_{0}*HSE_base_{0} + g_{0}*pom2_d_pom0_{0})".format(k))
+        if k == 'S0':
+            problem.add_equation("div(pom0_{0}*HSE_base_{0} + g_{0}*pom1_d_pom0_{0}) + lift_{0}(tau_s_{0}) + lift_{0}(tau_s2_{0}, k=-2) = -div(pomfluc_{0}*HSE_base_{0} + g_{0}*pom2_d_pom0_{0})".format(k))
+        else:
+            problem.add_equation("div(pom0_{0}*HSE_base_{0} + g_{0}*pom1_d_pom0_{0}) + lift_{0}(tau_s_{0}) = -div(pomfluc_{0}*HSE_base_{0} + g_{0}*pom2_d_pom0_{0})".format(k))
     
     #Set boundary conditions.
     iter = 0
@@ -481,6 +491,8 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
     for k, basis in bases.items():
         mass_integ_L += d3.integ(namespace['rho0_{}'.format(k)]*namespace['ln_rho1_{}'.format(k)])
         mass_integ_R += -d3.integ(namespace['rho0_{}'.format(k)]*(np.exp(namespace['ln_rho1_{}'.format(k)]) - 1 - namespace['ln_rho1_{}'.format(k)]))
+        if k == 'S0':
+            problem.add_equation("radial(grad(pom1_d_pom0_{0})(r={1})) = 0".format(k, basis.radii[0]))
         if iter < len(bases)-1:
             k_next = list(bases.keys())[iter+1]
             r_s = problem.stitch_radii[iter]
@@ -500,14 +512,14 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
     logger.info('FastIC found')
     logger.info('mass conservation: {}'.format((mass_integ_L - mass_integ_R).evaluate()['g']))
 
-#    r = local_ns['r_B']
+#    r = local_ns['r_S0']
 #    plt.plot(r.ravel(), s1['g'].ravel())
 
 #    plt.figure()
-#    plt.plot(r.ravel(), local_ns['grad_T1_B']['g'][2].ravel())
+#    plt.plot(r.ravel(), local_ns['grad_T1_S0']['g'][2].ravel())
 
 #    plt.figure()
-#    plt.plot(r.ravel(), namespace['ln_rho1_B']['g'].ravel())
+#    plt.plot(r.ravel(), namespace['ln_rho1_S0']['g'].ravel())
 #    plt.show()
 #    import sys
 #    sys.exit()
