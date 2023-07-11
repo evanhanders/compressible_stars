@@ -430,9 +430,11 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
     #Set up a bvp that forces grad_s and grad_ln_rho to produce this grad T, then solves for s1 and ln_rho1.
     variables = []
     taus = []
+
     for k, basis in bases.items():
         namespace['basis_{}'.format(k)] = basis
         namespace['S2_basis_{}'.format(k)] = S2_basis = basis.S2_basis()
+        namespace['M1_{}'.format(k)] = M1 = dist.Field(name='M1_{}'.format(k), bases=basis)
 
         # Make problem variables and taus
         namespace['pom0_{}'.format(k)] = pom0 = local_ns['pom0_{}'.format(k)]
@@ -455,6 +457,7 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
         namespace['pom2_d_pom0_{}'.format(k)] = pom2_d_pom0 = np.exp(pom1_d_pom0) - (1 + pom1_d_pom0)
         namespace['pomfluc_{}'.format(k)] = pomfluc = pom0*(pom1_d_pom0 + pom2_d_pom0)
         namespace['HSE_base_{}'.format(k)] = HSE_base = gamma*(d3.grad(s1)/Cp + d3.grad(ln_rho1))
+        namespace['HSE_check_{}'.format(k)] = HSE_check = (HSE_base)*(1+pom1_d_pom0+pom2_d_pom0) + g*(pom1_d_pom0+pom2_d_pom0)/pom0
 
         # Make lift operators for BCs
         if k == 'B':
@@ -462,45 +465,54 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
         else:
             namespace['lift_{}'.format(k)] = lift = lambda A, k=-1: d3.Lift(A, basis.derivative_basis(2), k)
     
-        variables += [namespace['{}_{}'.format(var, k)] for var in ['s1', 'ln_rho1']]
-        taus += [tau_s]
+        variables += [namespace['{}_{}'.format(var, k)] for var in ['s1', 'ln_rho1', 'M1']]
+        taus += []
         if k == 'B' or k == 'S0':
-            namespace['tau_M'.format(k)] = tau_M = dist.Field(name='tau_M', bases=S2_basis)
+            namespace['tau_M_{}'.format(k)] = tau_M = dist.Field(name='tau_M', bases=S2_basis)
+            namespace['tau_M2_{}'.format(k)] = tau_M2 = dist.Field(name='tau_M2', bases=S2_basis)
             if k == 'B':
-                taus += [tau_M,]
+                taus += [tau_M]
             else:
-                taus += [tau_M, tau_s2]
+                taus += [tau_M, tau_M2, tau_s]
     
     locals().update(namespace)
+    exp = np.exp
     problem = d3.NLBVP(variables + taus, namespace=locals())
     for k, basis in bases.items():
         #Equation is just definitional.
         if k == 'B' or k == 'S0':
-            problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) + er_{0}*lift_{0}(tau_M) = grad_pom1_{0}".format(k))
+            problem.add_equation("grad(M1_{0}) + er_{0}*lift_{0}(tau_M_{0}) = er_{0}*rho0_{0}*(exp(ln_rho1_{0}) - 1)".format(k))
         else:
-            problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) = grad_pom1_{0}".format(k))
-        if k == 'S0':
-            problem.add_equation("div(pom0_{0}*HSE_base_{0} + g_{0}*pom1_d_pom0_{0}) + lift_{0}(tau_s_{0}) + lift_{0}(tau_s2_{0}, k=-2) = -div(pomfluc_{0}*HSE_base_{0} + g_{0}*pom2_d_pom0_{0})".format(k))
+            problem.add_equation("grad(M1_{0}) = er_{0}*rho0_{0}*(exp(ln_rho1_{0}) - 1)".format(k))
+        if k == 'B' or k == 'S0':
+            problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) + er_{0}*lift_{0}(tau_s_{0}) = grad_pom1_{0}".format(k))
         else:
-            problem.add_equation("div(pom0_{0}*HSE_base_{0} + g_{0}*pom1_d_pom0_{0}) + lift_{0}(tau_s_{0}) = -div(pomfluc_{0}*HSE_base_{0} + g_{0}*pom2_d_pom0_{0})".format(k))
+            problem.add_equation("grad(pom0_{0}*pom1_d_pom0_{0}) + er_{0}*lift_{0}(tau_s_{0}) = grad_pom1_{0}".format(k))
+        if k == 'S0' or k == 'B':
+            problem.add_equation("er_{0}@(pom0_{0}*HSE_base_{0} + g_{0}*pom1_d_pom0_{0}) + lift_{0}(tau_M2_{0}, k=-2) = -er_{0}@(pomfluc_{0}*HSE_base_{0} + g_{0}*pom2_d_pom0_{0})".format(k))
+        else:
+            problem.add_equation("er_{0}@(pom0_{0}*HSE_base_{0} + g_{0}*pom1_d_pom0_{0}) = -er_{0}@(pomfluc_{0}*HSE_base_{0} + g_{0}*pom2_d_pom0_{0})".format(k))
     
     #Set boundary conditions.
     iter = 0
     mass_integ_L = 0
     mass_integ_R = 0
     for k, basis in bases.items():
-        mass_integ_L += d3.integ(namespace['rho0_{}'.format(k)]*namespace['ln_rho1_{}'.format(k)])
-        mass_integ_R += -d3.integ(namespace['rho0_{}'.format(k)]*(np.exp(namespace['ln_rho1_{}'.format(k)]) - 1 - namespace['ln_rho1_{}'.format(k)]))
+        #mass_integ_L += d3.integ(namespace['rho0_{}'.format(k)]*namespace['ln_rho1_{}'.format(k)])
+        #mass_integ_R += -d3.integ(namespace['rho0_{}'.format(k)]*(np.exp(namespace['ln_rho1_{}'.format(k)]) - 1 - namespace['ln_rho1_{}'.format(k)]))
         if k == 'S0':
-            problem.add_equation("radial(grad(pom1_d_pom0_{0})(r={1})) = 0".format(k, basis.radii[0]))
+            #problem.add_equation("radial(grad(pom1_d_pom0_{0})(r={1})) = 0".format(k, basis.radii[0]))
+            problem.add_equation("M1_{0}(r={1}) = 0".format(k, basis.radii[0]))
         if iter < len(bases)-1:
             k_next = list(bases.keys())[iter+1]
             r_s = problem.stitch_radii[iter]
             problem.add_equation("s1_{0}(r={2}) - s1_{1}(r={2}) = 0".format(k, k_next, r_s))
+            problem.add_equation("M1_{0}(r={2}) - M1_{1}(r={2}) = 0".format(k, k_next, r_s))
         else:
             #integ of mass == 0
             problem.add_equation("s1_{0}(r={1}) = 0".format(k, radius))
-            problem.add_equation((mass_integ_L, mass_integ_R))
+            problem.add_equation("M1_{0}(r={1}) = 0".format(k, radius))
+           # problem.add_equation((mass_integ_L, mass_integ_R))
         iter += 1
 
     solver = problem.build_solver()
@@ -510,18 +522,21 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
         pert_norm = sum(pert.allreduce_data_norm('c', 2) for pert in solver.perturbations)
         logger.info(f'Perturbation norm: {pert_norm:.3e}')
     logger.info('FastIC found')
-    logger.info('mass conservation: {}'.format((mass_integ_L - mass_integ_R).evaluate()['g']))
+    logger.info('mass conservation: {}'.format((M1(r=radius).evaluate()['g'])))#mass_integ_L - mass_integ_R).evaluate()['g']))
 
-#    r = local_ns['r_S0']
-#    plt.plot(r.ravel(), s1['g'].ravel())
+    r = local_ns['r_S0']
+    plt.plot(r.ravel(), s1['g'].ravel())
 
-#    plt.figure()
-#    plt.plot(r.ravel(), local_ns['grad_T1_S0']['g'][2].ravel())
+    plt.figure()
+    plt.plot(r.ravel(), local_ns['grad_T1_S0']['g'][2].ravel())
 
-#    plt.figure()
-#    plt.plot(r.ravel(), namespace['ln_rho1_S0']['g'].ravel())
-#    plt.show()
-#    import sys
-#    sys.exit()
+    plt.figure()
+    plt.plot(r.ravel(), namespace['ln_rho1_S0']['g'].ravel())
+
+    plt.figure()
+    plt.plot(r.ravel(), HSE_check.evaluate()['g'][2].ravel())
+    plt.show()
+    import sys
+    sys.exit()
     return namespace
 
