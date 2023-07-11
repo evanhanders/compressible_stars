@@ -524,19 +524,19 @@ def get_fastICs(problem, ncc_file, namespace, NuvRe, Re, equations='FC_HD', boun
     logger.info('FastIC found')
     logger.info('mass conservation: {}'.format((M1(r=radius).evaluate()['g'])))#mass_integ_L - mass_integ_R).evaluate()['g']))
 
-    r = local_ns['r_S0']
-    plt.plot(r.ravel(), s1['g'].ravel())
-
-    plt.figure()
-    plt.plot(r.ravel(), local_ns['grad_T1_S0']['g'][2].ravel())
-
-    plt.figure()
-    plt.plot(r.ravel(), namespace['ln_rho1_S0']['g'].ravel())
-
-    plt.figure()
-    plt.plot(r.ravel(), HSE_check.evaluate()['g'][2].ravel())
-    plt.show()
-    import sys
-    sys.exit()
+#    r = local_ns['r_S0']
+#    plt.plot(r.ravel(), s1['g'].ravel())
+#
+#    plt.figure()
+#    plt.plot(r.ravel(), local_ns['grad_T1_S0']['g'][2].ravel())
+#
+#    plt.figure()
+#    plt.plot(r.ravel(), namespace['ln_rho1_S0']['g'].ravel())
+#
+#    plt.figure()
+#    plt.plot(r.ravel(), HSE_check.evaluate()['g'][2].ravel())
+#    plt.show()
+#    import sys
+#    sys.exit()
     return namespace
 
